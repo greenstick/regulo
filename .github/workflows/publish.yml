@@ -1,0 +1,67 @@
+name: Publish
+
+# Runs only when you publish a GitHub Release (created from reviewed, protected
+# `main`/`master`) — never on pushes or pull requests. This isolation is the
+# core safety property: untrusted PR code can never reach this workflow, and the
+# release is built only from code you have reviewed and merged.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Least privilege. `id-token: write` is required for OIDC — both for npm
+# provenance attestation and for token-less ("trusted publisher") auth. No
+# other scope is granted, and there is no stored NPM_TOKEN to leak.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Optional but recommended: create a `npm-publish` environment in repo
+    # settings with required reviewers, so a human must approve before any
+    # publish actually runs.
+    environment: npm-publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # OIDC trusted publishing requires a recent npm. Pin the major so the
+      # toolchain is deterministic across runs.
+      - name: Upgrade npm (OIDC trusted publishing support)
+        run: npm install -g npm@^11
+
+      - name: Install
+        run: npm ci
+
+      # Defense in depth: re-run the full gate here, independent of the
+      # lifecycle `prepublishOnly` hook, so a release is never published unless
+      # types, tests, build, and package validation all pass on a clean checkout.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate package (publint + arethetypeswrong)
+        run: npm run lint:package
+
+      # Token-less publish via OIDC. Requires a one-time setup on npmjs.com:
+      # configure this repository + workflow as a "Trusted Publisher" for the
+      # package (package Settings → Trusted Publisher). `--provenance` attaches a
+      # signed attestation linking the tarball to this commit and workflow run,
+      # which consumers can verify. No NPM_TOKEN secret is used.
+      - name: Publish to npm
+        run: npm publish --provenance --access public

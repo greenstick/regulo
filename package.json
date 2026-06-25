@@ -1,0 +1,79 @@
+{
+  "name": "regulo",
+  "version": "1.0.0",
+  "description": "Control the heat — a priority-queue semaphore with weighted permits, a saturation circuit breaker, adaptive backoff, and built-in metrics. Zero dependencies.",
+  "license": "MIT",
+  "author": "Greenstick <benacordier@gmail.com>",
+  "homepage": "https://github.com/greenstick/regulo#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/greenstick/regulo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/greenstick/regulo/issues"
+  },
+  "keywords": [
+    "regulo",
+    "semaphore",
+    "circuit-breaker",
+    "concurrency",
+    "concurrency-limit",
+    "concurrency-limiter",
+    "rate-limit",
+    "backpressure",
+    "bulkhead",
+    "ssr",
+    "backoff",
+    "priority-queue",
+    "queue",
+    "throttle",
+    "resilience",
+    "load-shedding",
+    "async",
+    "promise",
+    "typescript"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint:package": "publint && attw --pack",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build && npm run lint:package"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.3",
+    "@vitest/coverage-v8": "4.1.9",
+    "publint": "0.3.21",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "4.1.9"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "regulo-benchmarks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Performance benchmarks for regulo. Not published to npm; excluded from the package by the root `files` allowlist.",
+  "type": "module",
+  "scripts": {
+    "bench": "node self.js",
+    "compare": "node compare.js",
+    "breakers": "node breakers.js",
+    "all": "node self.js && node compare.js && node breakers.js",
+    "md": "node self.js --md && node compare.js --md && node breakers.js --md"
+  },
+  "dependencies": {
+    "regulo": "file:.."
+  },
+  "devDependencies": {
+    "cockatiel": "4.0.0",
+    "opossum": "9.0.0",
+    "p-limit": "^6.1.0",
+    "p-queue": "^8.0.1"
+  }
+}
