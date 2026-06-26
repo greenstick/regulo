@@ -37,42 +37,10 @@ Requires Node.js >= 20 (or any runtime providing `AbortSignal`, `queueMicrotask`
 ## 🚀 Quick start
 
 ```ts
-import { Semaphore, type SemaphoreConfig } from 'regulo';
+import { Semaphore } from 'regulo';
 
-/*
-Defaults
-*/
+const semaphore = new Semaphore(10); // 10 concurrent permits — ten burners
 
-const config: SemaphoreConfig = {
-  // Queue
-  queueMaxLength: Number.MAX_SAFE_INTEGER, // effectively unbounded; min 1
-  queueMaxTimeout: 10000,                  // ms a queued task waits before TIMEOUT; min 1
-  queueMaxAge: 30000,                      // ms before the purge sweep ejects a task; min 1
-  rejectOnFull: false,                     // true = no queuing; reject when all permits held
-  // Circuit breaker
-  circuitBreakerThreshold: 0.5,            // timeout rate in (0,1) that trips the circuit
-  circuitBreakerWindow: 10000,             // ms sliding window for the rate; min 1000
-  circuitBreakerCooldown: 5000,            // ms open before a probe is allowed; min 1000
-  circuitBreakerMinThroughput: 10,         // min requests in window before it can trip; min 1
-  circuitBreakerMinFailures: 5,            // min failures in window before it can trip; min 1
-  // Adaptive backoff
-  backoffInitialTimeout: 50,               // ms initial delay on first timeout in a burst
-  backoffMaxTimeout: 2000,                 // ms ceiling for the backoff delay
-  backoffDecayFactor: 0.5,                 // decay per idle second, in (0,1)
-  // Maintenance & observability
-  purgeIntervalMs: 3000,                   // ms between stale-task purge sweeps; min 500
-  metricsEnabled: true,                    // windowed metrics collection
-  debug: false,                            // debug logging + permit-pool invariant check
-  // Ordering
-  queueOrder: 'fifo',                      // 'fifo' | 'lifo' | 'fifoIgnorePriority' | 'lifoIgnorePriority'
-  // comparator: undefined,                // no default — if set, overrides queueOrder
-};
-
-/*
-Usage
-*/
-
-const semaphore = new Semaphore(10, config); // 10 concurrent permits — ten burners
 const result = await semaphore.use(async () => {
   return await expensiveOperation();
 });
@@ -196,7 +164,7 @@ Event Hooks
 // Events fire once per state change for the whole limiter — the right place
 // for logging / metrics / alerting, never for responding to a single request.
 reports.on(SemaphoreEvents.CIRCUITOPEN, ({ timeoutRate }) => logger.warn(`reports limiter shedding load (timeout rate ${(timeoutRate * 100).toFixed(0)}%)`));
-reports.on(SemaphoreEvents.CIRCUITCLOSE, () => logger.info('reports limiter recovered'));                                                                  
+reports.on(SemaphoreEvents.CIRCUITCLOSE, () => logger.info('reports limiter recovered'));
 ```
 
 ## 📚 API reference
@@ -293,6 +261,39 @@ Number of permits not currently held.
 | `queueOrder` | `'fifo' \| 'lifo' \| 'fifoIgnorePriority' \| 'lifoIgnorePriority'` | `'fifo'` | Queue dispatch order. `fifo`/`lifo` keep priority primary; the `*IgnorePriority` variants order purely by enqueue time. Ignored if `comparator` is set |
 | `comparator` | `(a, b) => number` | — | Custom ordering over queued tasks (lower sorts/dispatches first); overrides `queueOrder` |
 | `debug` | `boolean` | `false` | Enable debug logging and the permit-pool invariant check. Does not gate events — all events fire regardless |
+
+Every option is optional. The object below is the complete set of defaults — copy it and change only what you need:
+
+```ts
+import { Semaphore, type SemaphoreConfig } from 'regulo';
+
+const config: SemaphoreConfig = {
+  // Queue
+  queueMaxLength: Number.MAX_SAFE_INTEGER, // effectively unbounded; min 1
+  queueMaxTimeout: 10000,                  // ms a queued task waits before TIMEOUT; min 1
+  queueMaxAge: 30000,                      // ms before the purge sweep ejects a task; min 1
+  rejectOnFull: false,                     // true = no queuing; reject when all permits held
+  // Circuit breaker
+  circuitBreakerThreshold: 0.5,            // timeout rate in (0,1) that trips the circuit
+  circuitBreakerWindow: 10000,             // ms sliding window for the rate; min 1000
+  circuitBreakerCooldown: 5000,            // ms open before a probe is allowed; min 1000
+  circuitBreakerMinThroughput: 10,         // min requests in window before it can trip; min 1
+  circuitBreakerMinFailures: 5,            // min failures in window before it can trip; min 1
+  // Adaptive backoff
+  backoffInitialTimeout: 50,               // ms initial delay on first timeout in a burst
+  backoffMaxTimeout: 2000,                 // ms ceiling for the backoff delay
+  backoffDecayFactor: 0.5,                 // decay per idle second, in (0,1)
+  // Maintenance & observability
+  purgeIntervalMs: 3000,                   // ms between stale-task purge sweeps; min 500
+  metricsEnabled: true,                    // windowed metrics collection
+  debug: false,                            // debug logging + permit-pool invariant check
+  // Ordering
+  queueOrder: 'fifo',                      // 'fifo' | 'lifo' | 'fifoIgnorePriority' | 'lifoIgnorePriority'
+  // comparator: undefined,                // no default — if set, overrides queueOrder
+};
+
+const semaphore = new Semaphore(10, config);
+```
 
 ## ⇄ Events reference
 
@@ -521,21 +522,6 @@ npx vitest run --coverage
  Test Files  8 passed (8)
       Tests  179 passed (179)
 ```
-
-| File | % Stmts | % Branch | % Funcs | % Lines |
-|---|--:|--:|--:|--:|
-| **All files** | **95.44** | **88.18** | **98.64** | **98.92** |
-| `backoff.ts` | 100 | 100 | 100 | 100 |
-| `breaker.ts` | 100 | 100 | 100 | 100 |
-| `error.ts` | 100 | 100 | 100 | 100 |
-| `heap.ts` | 98.7 | 97.67 | 100 | 100 |
-| `metrics.ts` | 96.6 | 83.78 | 97.56 | 97.67 |
-| `ordering.ts` | 100 | 100 | 100 | 100 |
-| `permit.ts` | 100 | 87.5 | 100 | 100 |
-| `queue.ts` | 100 | 82.35 | 100 | 100 |
-| `semaphore.ts` | 91.22 | 83.62 | 97.29 | 98.54 |
-| `types.ts` | 100 | 100 | 100 | 100 |
-| `validation.ts` | 100 | 95.45 | 100 | 100 |
 
 ## ⚠️ Caveats
 
