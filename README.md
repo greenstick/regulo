@@ -1,6 +1,6 @@
-# 🎛️ Regulo
+# 🎛️ **Regulo**
 
-**Control the heat.**
+**🔥 Control the heat**
 
 [![npm version](https://img.shields.io/npm/v/regulo.svg)](https://www.npmjs.com/package/regulo)
 [![CI](https://github.com/greenstick/regulo/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/greenstick/regulo/actions/workflows/ci.yml)
@@ -12,14 +12,14 @@
 
 ---
 
-A concurrency limiter with a built-in circuit breaker, so the expensive parts of your system never boil over. Regulo is a priority-queue semaphore with weighted permits, a saturation circuit breaker, adaptive backoff, and built-in windowed metrics. Zero dependencies, ships ESM and CJS, runs on Node.js and other modern JavaScript runtimes.
+A concurrency limiter with a built-in circuit breaker, so the expensive parts of your system never boil over. **Regulo** is a priority-queue semaphore with weighted permits, a saturation circuit breaker, adaptive backoff, and built-in windowed metrics. Zero dependencies, ships ESM and CJS, runs on Node.js and other modern JavaScript runtimes.
 
-Like the dial on a gas range, Regulo sits between incoming work and the burner. Most concurrency libraries just cap how many things run at once and stop there. Regulo is built for the case where that limit is protecting something expensive — SSR rendering, a database pool, a downstream API — and you need to watch the flame, send the important pots to the front, and turn things down cleanly before the system scorches.
+Like the dial on a gas range, **Regulo** sits between incoming work and the burner. Most concurrency libraries just cap how many things run at once and stop there. **Regulo** is built for the case where that limit is protecting something expensive — SSR rendering, a database pool, a downstream API — and you need to watch the flame, send the important pots to the front, and turn things down cleanly before the system scorches.
 
 ## ✨ Highlights
 
 - **🎛️ Bounded concurrency, with priority and weighting** — set how many burners are lit, send important work to the front, and let one heavy job claim more than one burner.
-- **🛡️ Saturation circuit breaker** — when work backs up faster than it clears, Regulo takes the pot off the heat: it opens the circuit and sheds load immediately, then probes for recovery and closes again on its own. (See [How the circuit breaker works](#how-the-circuit-breaker-works) — it trips on saturation, not on your operation's errors.)
+- **🛡️ Saturation circuit breaker** — when work backs up faster than it clears, **Regulo** takes the pot off the heat: it opens the circuit and sheds load immediately, then probes for recovery and closes again on its own. (See [How the circuit breaker works](#how-the-circuit-breaker-works) — it trips on saturation, not on your operation's errors.)
 - **🌡️ Adaptive backoff** — during a timeout burst, dispatch eases down to a simmer and returns to a full boil on its own once things recover.
 - **📈 Built-in observability** — windowed 1m/5m/15m/1h/24h rollups (throughput, latency, queue depth, in-flight), lifetime counters, and an event stream, all through one `status()` call.
 - **⏳ Head-of-line fairness** — once a caller is in line, nobody jumps the queue ahead of it.
@@ -37,10 +37,42 @@ Requires Node.js >= 20 (or any runtime providing `AbortSignal`, `queueMicrotask`
 ## 🚀 Quick start
 
 ```ts
-import { Semaphore } from 'regulo';
+import { Semaphore, type SemaphoreConfig } from 'regulo';
 
-const semaphore = new Semaphore(10); // 10 concurrent permits — ten burners
+/*
+Defaults
+*/
 
+const config: SemaphoreConfig = {
+  // Queue
+  queueMaxLength: Number.MAX_SAFE_INTEGER, // effectively unbounded; min 1
+  queueMaxTimeout: 10000,                  // ms a queued task waits before TIMEOUT; min 1
+  queueMaxAge: 30000,                      // ms before the purge sweep ejects a task; min 1
+  rejectOnFull: false,                     // true = no queuing; reject when all permits held
+  // Circuit breaker
+  circuitBreakerThreshold: 0.5,            // timeout rate in (0,1) that trips the circuit
+  circuitBreakerWindow: 10000,             // ms sliding window for the rate; min 1000
+  circuitBreakerCooldown: 5000,            // ms open before a probe is allowed; min 1000
+  circuitBreakerMinThroughput: 10,         // min requests in window before it can trip; min 1
+  circuitBreakerMinFailures: 5,            // min failures in window before it can trip; min 1
+  // Adaptive backoff
+  backoffInitialTimeout: 50,               // ms initial delay on first timeout in a burst
+  backoffMaxTimeout: 2000,                 // ms ceiling for the backoff delay
+  backoffDecayFactor: 0.5,                 // decay per idle second, in (0,1)
+  // Maintenance & observability
+  purgeIntervalMs: 3000,                   // ms between stale-task purge sweeps; min 500
+  metricsEnabled: true,                    // windowed metrics collection
+  debug: false,                            // debug logging + permit-pool invariant check
+  // Ordering
+  queueOrder: 'fifo',                      // 'fifo' | 'lifo' | 'fifoIgnorePriority' | 'lifoIgnorePriority'
+  // comparator: undefined,                // no default — if set, overrides queueOrder
+};
+
+/*
+Usage
+*/
+
+const semaphore = new Semaphore(10, config); // 10 concurrent permits — ten burners
 const result = await semaphore.use(async () => {
   return await expensiveOperation();
 });
@@ -48,9 +80,9 @@ const result = await semaphore.use(async () => {
 
 `use()` acquires a permit, runs your function, and releases the permit afterward — even if the function throws. The primary export is the `Semaphore` class; `regulo` is the dial wrapped around it.
 
-## How it compares
+## ⚖️ How it compares
 
-Regulo overlaps with several well-known libraries but sits at the intersection of bounded concurrency, prioritization, and resilience, with built-in observability.
+**Regulo** overlaps with several well-known libraries but sits at the intersection of bounded concurrency, prioritization, and resilience, with built-in observability.
 
 | Capability | regulo | p-limit | p-queue | opossum | cockatiel |
 |---|---|---|---|---|---|
@@ -64,7 +96,7 @@ Regulo overlaps with several well-known libraries but sits at the intersection o
 
 Capabilities reflect each project's commonly documented feature set at the time of writing; check the respective projects for their current state. If you only need a concurrency cap, `p-limit` is smaller and simpler. If you need rich resilience policy composition (retry, timeout, fallback), `cockatiel` is a strong choice. Reach for `regulo` when you want prioritized, weighted concurrency limiting that you can monitor and that protects itself under sustained load.
 
-## Core concepts
+## 🎯 Core concepts
 
 **Semaphore** — holds a fixed pool of permits (the burners). Callers acquire a permit before doing work and release it when done. When all permits are held, callers queue until one frees up, or until their timeout fires.
 
@@ -96,7 +128,7 @@ const c = new Semaphore(4, { comparator: QUEUE_ORDERINGS.lifo });
 
 **Backoff** — exponential backoff eases dispatch down to a simmer during sustained timeout bursts. The delay grows on each timeout and decays continuously over time, throttling dispatch while downstream systems recover and returning to zero on its own once the burst subsides. The current delay is exposed in `status()` and `TASKTIMEOUT` events.
 
-## How the circuit breaker works
+## 💡 How the circuit breaker works
 
 The breaker is a **saturation breaker, not a fault breaker**. It watches the rate of *queue-acquisition timeouts* — callers that waited longer than `queueMaxTimeout` for a permit — over a sliding window. When that rate crosses `circuitBreakerThreshold` (and the minimum count guards are met), the circuit opens and new requests are rejected immediately with `CIRCUIT_OPEN`. After the cooldown elapses, one probe request is allowed through; if it succeeds the circuit closes, if it times out the circuit re-opens and the cooldown restarts.
 
@@ -107,31 +139,64 @@ What this means in practice:
 
 If you also need to trip on downstream *errors* (not just saturation), pair the semaphore with a conventional fault breaker around your operation, or use the standalone [`CircuitBreaker`](#standalone-circuitbreaker) and feed it your own failure signal.
 
-## 🍳 Recipe: Express middleware
+## 🥘 Recipe: Express middleware
 
 Cap concurrent handling of an expensive route and shed load with a `503` when the circuit is open or the queue is full:
 
 ```ts
-import { Semaphore, SemaphoreError } from 'regulo';
+import { Semaphore, SemaphoreError, SemaphoreEvents } from 'regulo';
+import type { RequestHandler } from 'express';
 
-const semaphore = new Semaphore(20, { queueMaxLength: 100, queueMaxTimeout: 2000 });
+/*
+Middleware
+*/
 
-app.get('/report', async (req, res, next) => {
-  try {
-    const report = await semaphore.use(() => buildExpensiveReport(req.query));
-    res.json(report);
-  } catch (error) {
-    if (error instanceof SemaphoreError) {
-      // CIRCUIT_OPEN, QUEUE_FULL, or TIMEOUT — kitchen's slammed, turn them away
-      res.setHeader('Retry-After', '5').status(503).end();
-      return;
+export function limit(semaphore: Semaphore): RequestHandler {
+  return async (req, res, next) => {
+    let release: (() => void) | undefined;
+    try {
+      release = await semaphore.acquire();
+    } catch (error) {
+      // CIRCUIT_OPEN | QUEUE_FULL | TIMEOUT all mean the same to a client:
+      // we're overloaded, come back later. No need to branch on error.code.
+      if (error instanceof SemaphoreError) {
+        res.setHeader('Retry-After', '5').sendStatus(503);
+        return;
+      }
+      return next(error);
     }
-    next(error);
-  }
+    // Hold the permit for the whole request; release however the response ends
+    // (success, error, or client disconnect). Regulo's release is idempotent.
+    res.once('close', release);
+    next();
+  };
+}
+
+/*
+Usage
+*/
+
+const reports = new Semaphore(20, { queueMaxLength: 100, queueMaxTimeout: 2000 });
+
+app.get('/report', limit(reports), async (req, res) => {
+  res.json(await buildExpensiveReport(req.query));
 });
 
-// Expose the limiter's state to your metrics endpoint
-app.get('/internal/semaphore', (_req, res) => res.json(semaphore.status()));
+/*
+Metrics
+*/
+
+// Expose the limiter's state to your metrics endpoint.
+app.get('/metrics/semaphore', (_req, res) => res.json(reports.status()));
+
+/*
+Event Hooks
+*/
+
+// Events fire once per state change for the whole limiter — the right place
+// for logging / metrics / alerting, never for responding to a single request.
+reports.on(SemaphoreEvents.CIRCUITOPEN, ({ timeoutRate }) => logger.warn(`reports limiter shedding load (timeout rate ${(timeoutRate * 100).toFixed(0)}%)`));
+reports.on(SemaphoreEvents.CIRCUITCLOSE, () => logger.info('reports limiter recovered'));                                                                  
 ```
 
 ## 📚 API reference
@@ -207,7 +272,7 @@ Current number of tasks waiting for a permit.
 
 Number of permits not currently held.
 
-## Configuration reference
+## ⚙️ Configuration reference
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -229,7 +294,7 @@ Number of permits not currently held.
 | `comparator` | `(a, b) => number` | — | Custom ordering over queued tasks (lower sorts/dispatches first); overrides `queueOrder` |
 | `debug` | `boolean` | `false` | Enable debug logging and the permit-pool invariant check. Does not gate events — all events fire regardless |
 
-## Events reference
+## ⇄ Events reference
 
 Listen with `Semaphore.on(SemaphoreEvents.CIRCUITOPEN, handler)`.
 
@@ -245,7 +310,7 @@ Listen with `Semaphore.on(SemaphoreEvents.CIRCUITOPEN, handler)`.
 | `CIRCUITCLOSE` | `'circuit-close'` | none |
 | `SHUTDOWN` | `'shutdown'` | `reason: string` |
 
-## Error codes
+## 🚨 Error codes
 
 All rejections are `SemaphoreError` instances with a `code` property.
 
@@ -308,7 +373,7 @@ try {
 }
 ```
 
-## Standalone `CircuitBreaker`
+## 🔌 Standalone `CircuitBreaker`
 
 `CircuitBreaker` can be used independently — e.g. to wrap an HTTP client. Unlike the semaphore's saturation breaker, here you decide what counts as a failure by calling `recordTimeout()` on whatever signal you choose:
 
@@ -350,7 +415,7 @@ Full, reproducible benchmarks live in [`benchmarks/`](./benchmarks) — run them
 yourself with `npm run benchmark:all`. Figures below are from a real run on
 Node v22.16.0, darwin x64, mid-2018 Intel i9 Macbook Pro; your numbers will differ — re-run locally. Each
 library from [How it compares](#how-it-compares) is benchmarked only on the
-axis it actually shares with Regulo: the concurrency limiters on capping
+axis it actually shares with **Regulo**: the concurrency limiters on capping
 concurrency, the circuit breakers on per-call overhead.
 
 **🔥 Fast path, uncontended**
@@ -423,14 +488,14 @@ an empty queue.
 | opossum | 1.62M | 2.29x slower |
 
 The picture is consistent. Cockatiel's bulkhead is the fastest limiter — and
-Regulo trades raw limiter throughput for an integrated priority heap, weighted
+**Regulo** trades raw limiter throughput for an integrated priority heap, weighted
 permits, a saturation breaker, and (by default) windowed metrics in one component.
-On the breaker axis that integration goes the other way: Regulo's standalone
+On the breaker axis that integration goes the other way: **Regulo**'s standalone
 `CircuitBreaker` is the fastest of the three, because it defers failure
 accounting to an explicit timeout signal instead of bookkeeping a rolling
 window on every call.
 
-In practice none of this is the bottleneck. Regulo guards work that is *far*
+In practice none of this is the bottleneck. **Regulo** guards work that is *far*
 more expensive than the limiter itself: SSR renders, database queries,
 downstream API calls, measured in milliseconds. Even at ~500k tasks/sec
 under contention the per-task overhead is a few microseconds against operations
@@ -472,12 +537,7 @@ npx vitest run --coverage
 | `types.ts` | 100 | 100 | 100 | 100 |
 | `validation.ts` | 100 | 95.45 | 100 | 100 |
 
-179 tests across 8 suites, all green ✅. Coverage is v8-instrumented; the
-handful of uncovered branches sit in `semaphore.ts` and `metrics.ts` (edge-case
-branch combinations) and a single line each in `heap.ts`, `permit.ts`, and
-`validation.ts`.
-
-## Caveats
+## ⚠️ Caveats
 
 Before you crank the dial, know where the edges are:
 
@@ -485,6 +545,6 @@ Before you crank the dial, know where the edges are:
 - **`drain()` without a timeout can block indefinitely** if a permit holder never releases. Always pass `timeoutMs` in graceful-shutdown paths.
 - **The circuit breaker is a saturation breaker.** It trips on queue-acquisition timeouts, not on errors thrown by your operation. See [How the circuit breaker works](#how-the-circuit-breaker-works).
 
-## License
+## 📜 License
 
 [MIT](./LICENSE)
