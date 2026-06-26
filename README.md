@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/regulo.svg)](https://www.npmjs.com/package/regulo)
 [![CI](https://github.com/greenstick/regulo/actions/workflows/ci.yml/badge.svg)](https://github.com/greenstick/regulo/actions/workflows/ci.yml)
-[![coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/greenstick/GIST_ID/raw/regulo-coverage.json)](https://github.com/greenstick/regulo/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/greenstick/3199efaef7c0b4872452f05d2bf837dd/raw/regulo-coverage.json)](https://github.com/greenstick/regulo/actions/workflows/ci.yml)
 [![minzipped size](https://img.shields.io/bundlephobia/minzip/regulo)](https://bundlephobia.com/package/regulo)
 [![types](https://img.shields.io/npm/types/regulo.svg)](https://www.npmjs.com/package/regulo)
 [![license](https://img.shields.io/npm/l/regulo.svg)](./LICENSE)
