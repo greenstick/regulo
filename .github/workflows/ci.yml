@@ -55,3 +55,52 @@ jobs:
 
       - name: Validate package (publint + arethetypeswrong)
         run: npm run lint:package
+
+  # Generates the coverage badge. Runs only on pushes to the default branch:
+  # pull requests (especially from forks) cannot access the GIST_SECRET, and we
+  # don't want PR runs rewriting the published badge anyway. The README badge is
+  # a shields.io endpoint that reads the JSON this job writes to a gist.
+  coverage:
+    name: coverage badge
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Run coverage
+        run: npm run test:coverage
+
+      # vitest's json-summary reporter writes coverage/coverage-summary.json.
+      # Pull out the overall line coverage as a rounded integer for the badge.
+      - name: Extract line coverage
+        id: cov
+        run: |
+          pct=$(jq -r '.total.lines.pct' coverage/coverage-summary.json)
+          echo "pct=$(printf '%.0f' "$pct")" >> "$GITHUB_OUTPUT"
+
+      # Writes a shields.io "endpoint" JSON to a gist. valColorRange auto-colors
+      # the badge from red (50%) to green (95%). Requires a GIST_SECRET PAT with
+      # the `gist` scope and the gist id in the GIST_ID repo variable.
+      - name: Update coverage badge gist
+        uses: schneegans/dynamic-badges-action@e9a478b16159b4d31420099ba146cdc50f134483 # v1.7.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ vars.GIST_ID }}
+          filename: regulo-coverage.json
+          label: coverage
+          message: ${{ steps.cov.outputs.pct }}%
+          valColorRange: ${{ steps.cov.outputs.pct }}
+          minColorRange: '50'
+          maxColorRange: '95'

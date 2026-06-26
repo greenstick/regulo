@@ -2,11 +2,21 @@
 
 **Control the heat.**
 
+[![npm version](https://img.shields.io/npm/v/regulo.svg)](https://www.npmjs.com/package/regulo)
+[![CI](https://github.com/greenstick/regulo/actions/workflows/ci.yml/badge.svg)](https://github.com/greenstick/regulo/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/greenstick/GIST_ID/raw/regulo-coverage.json)](https://github.com/greenstick/regulo/actions/workflows/ci.yml)
+[![minzipped size](https://img.shields.io/bundlephobia/minzip/regulo)](https://bundlephobia.com/package/regulo)
+[![types](https://img.shields.io/npm/types/regulo.svg)](https://www.npmjs.com/package/regulo)
+[![license](https://img.shields.io/npm/l/regulo.svg)](./LICENSE)
+[![Socket](https://badge.socket.dev/npm/package/regulo)](https://socket.dev/npm/package/regulo)
+
+---
+
 A concurrency limiter with a built-in circuit breaker, so the expensive parts of your system never boil over. Regulo is a priority-queue semaphore with weighted permits, a saturation circuit breaker, adaptive backoff, and built-in windowed metrics. Zero dependencies, ships ESM and CJS, runs on Node.js and other modern JavaScript runtimes.
 
 Like the dial on a gas range, Regulo sits between incoming work and the burner. Most concurrency libraries just cap how many things run at once and stop there. Regulo is built for the case where that limit is protecting something expensive — SSR rendering, a database pool, a downstream API — and you need to watch the flame, send the important pots to the front, and turn things down cleanly before the system scorches.
 
-## Highlights ✨
+## ✨ Highlights
 
 - **🎛️ Bounded concurrency, with priority and weighting** — set how many burners are lit, send important work to the front, and let one heavy job claim more than one burner.
 - **🛡️ Saturation circuit breaker** — when work backs up faster than it clears, Regulo takes the pot off the heat: it opens the circuit and sheds load immediately, then probes for recovery and closes again on its own. (See [How the circuit breaker works](#how-the-circuit-breaker-works) — it trips on saturation, not on your operation's errors.)
@@ -16,7 +26,7 @@ Like the dial on a gas range, Regulo sits between incoming work and the burner. 
 - **🪶 Tiny footprint, no supply-chain surface** — roughly 6.6 KB min+gzip (~26 KB minified, ~6.1 KB brotli) with zero runtime dependencies, so there's nothing transitive to audit, update, or trust. Tree-shakeable ESM.
 - **🧯 Production-minded** — graceful `drain()`, `reset()`, `cancel()`, and `shutdown()`; stale-task purging; double-release safety; strict-mode TypeScript types.
 
-## Install 📦
+## 📦 Install
 
 ```bash
 npm install regulo
@@ -24,7 +34,7 @@ npm install regulo
 
 Requires Node.js >= 20 (or any runtime providing `AbortSignal`, `queueMicrotask`, and timers).
 
-## Quick start 🚀
+## 🚀 Quick start
 
 ```ts
 import { Semaphore } from 'regulo';
@@ -97,7 +107,7 @@ What this means in practice:
 
 If you also need to trip on downstream *errors* (not just saturation), pair the semaphore with a conventional fault breaker around your operation, or use the standalone [`CircuitBreaker`](#standalone-circuitbreaker) and feed it your own failure signal.
 
-## Recipe: Express middleware 🍳
+## 🍳 Recipe: Express middleware
 
 Cap concurrent handling of an expensive route and shed load with a `503` when the circuit is open or the queue is full:
 
@@ -124,7 +134,7 @@ app.get('/report', async (req, res, next) => {
 app.get('/internal/semaphore', (_req, res) => res.json(semaphore.status()));
 ```
 
-## API reference 📚
+## 📚 API reference
 
 ### `new Semaphore(count, config?)`
 
@@ -334,7 +344,7 @@ async function fetch(url: string) {
 }
 ```
 
-## Benchmarks ⚡
+## ⚡ Benchmarks
 
 Full, reproducible benchmarks live in [`benchmarks/`](./benchmarks) — run them
 yourself with `npm run benchmark:all`. Figures below are from a real run on
@@ -427,7 +437,7 @@ under contention the per-task overhead is a few microseconds against operations
 thousands of times slower. If you only need a bare concurrency cap on cheap
 work in a hot loop, reach for a leaner limiter; see [How it compares](#how-it-compares).
 
-## Test coverage 🧪
+## 🧪 Test coverage
 
 ```
 npx vitest run --coverage
