@@ -24,6 +24,11 @@ export class QueuedTask {
   public readonly isProbe: boolean;
   public readonly weight: number;
 
+  // Intrusive links for the semaphore's enqueue-ordered index (see IntrusiveList
+  // in ./list). Owned and mutated solely by that list; untouched otherwise.
+  public prev: QueuedTask | null = null;
+  public next: QueuedTask | null = null;
+
   private completed = false;
   private timeoutId?: ReturnType<typeof setTimeout>;
   private abortListener?: () => void;
@@ -100,43 +105,5 @@ export class QueuedTask {
       this.abortSignal.removeEventListener('abort', this.abortListener);
     }
     return true;
-  }
-}
-
-/*
-Queue Age Cache
-
-Lazily-updated cache of the oldest enqueue time in the queue.
-- Insert is O(1) (min check only; new tasks are never older than existing ones).
-- Read is O(1) when clean, O(N) when dirty (after any removal).
-- Invalidated after any removal that may have evicted the oldest task.
-*/
-
-export class QueueAgeCache {
-  private _oldest = 0;
-
-  public onInsert(enqueueTime: number): void {
-    if (this._oldest === 0 || enqueueTime < this._oldest) {
-      this._oldest = enqueueTime;
-    }
-  }
-
-  public invalidate(): void {
-    this._oldest = 0;
-  }
-
-  public ageMs(tasks: QueuedTask[]): number {
-    if (tasks.length === 0) return 0;
-    if (this._oldest !== 0) return Date.now() - this._oldest;
-    let oldest = Infinity;
-    for (const task of tasks) {
-      if (task.enqueueTime < oldest) oldest = task.enqueueTime;
-    }
-    this._oldest = oldest === Infinity ? 0 : oldest;
-    return this._oldest === 0 ? 0 : Date.now() - this._oldest;
-  }
-
-  public reset(): void {
-    this._oldest = 0;
   }
 }

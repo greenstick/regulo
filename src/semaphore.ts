@@ -30,8 +30,9 @@ import { SemaphoreError } from './error';
 import { PermitPool } from './permit';
 import { CircuitBreaker } from './breaker';
 import { BackoffTracker } from './backoff';
-import { QueuedTask, QueueAgeCache } from './queue';
+import { QueuedTask } from './queue';
 import { IndexedBinaryHeap } from "./heap";
+import { IntrusiveList } from "./list";
 import { SemaphoreMetrics } from './metrics';
 import { buildComparator } from './ordering';
 import { SemaphoreEvents } from './types';
@@ -41,11 +42,15 @@ import type { SemaphoreConfig, SemaphoreEventType, SemaphoreMetricsSnapshot } fr
 export class Semaphore {
 
   // Sub-systems
+  // The queue is indexed twice over the same tasks: `queue` (priority heap)
+  // drives dispatch order; `enqueueOrder` (insertion-ordered linked list) gives
+  // O(1) queue-age reads and an O(s) stale purge. Both are kept in lockstep —
+  // every queued task is present in both, or neither (see _enqueue/_dequeue).
   private queue: IndexedBinaryHeap<QueuedTask>;
+  private readonly enqueueOrder: IntrusiveList<QueuedTask>;
   private readonly permits:  PermitPool;
   private readonly circuit:  CircuitBreaker;
   private readonly backoff:  BackoffTracker;
-  private readonly queueAge: QueueAgeCache;
   private readonly metricsCollector?: SemaphoreMetrics;
 
   // Config
@@ -84,7 +89,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     // > 0
     this.queueMaxTimeout = validateNumber(config.queueMaxTimeout ?? 10000, "Semaphore queueMaxTimeout", 1, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
-    this.queueMaxLength = validateNumber(config.queueMaxLength ?? Number.MAX_SAFE_INTEGER, "Semaphore queueMaxLength", 1, Number.MAX_SAFE_INTEGER, true, true);
+    this.queueMaxLength = validateNumber(config.queueMaxLength ?? 1024, "Semaphore queueMaxLength", 1, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
     this.queueMaxAge = validateNumber(config.queueMaxAge ?? 30000, "Semaphore queueMaxAge", 1, Number.MAX_SAFE_INTEGER, true, true);
 
@@ -94,15 +99,15 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.debug           = config.debug           ?? false;
 
     // Initialize Sub-systems
-    // Ascending priority; ties broken per the configured ordering ('fifo' by
-    // default) or a custom comparator. Probe tasks are forced to the head by the
+    // Ascending priority; ties broken per the configured ordering
+    // ('fifoWithPriority' by default) or a custom comparator. Probe tasks are forced to the head by the
     // wrapper so the half-open scheduler can always find them. The id tie-break
     // in the built-in orderings keeps the binary heap stable; without it later
     // callers could jump ahead, violating head-of-line fairness.
     const comparator = buildComparator<QueuedTask>({ queueOrder: config.queueOrder, comparator: config.comparator });
-    this.queue    = new IndexedBinaryHeap<QueuedTask>(comparator);
-    this.queueAge = new QueueAgeCache();
-    this.permits  = new PermitPool(count);
+    this.queue        = new IndexedBinaryHeap<QueuedTask>(comparator);
+    this.enqueueOrder = new IntrusiveList<QueuedTask>();
+    this.permits      = new PermitPool(count);
     // Validation performed in CircuitBreaker
     this.circuit  = new CircuitBreaker({
       threshold:     config.circuitBreakerThreshold,
@@ -231,12 +236,31 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   }
 
   /*
+  Queue mutation — keeps the priority heap and the enqueue-ordered list in sync.
+  Every queued task lives in both structures or neither, so these are the only
+  two methods that add to / remove from the queue (the scheduler's pop() is the
+  one exception: it pops the heap head directly, then drops the same id here).
+  */
+
+  private _enqueue(task: QueuedTask): void {
+    this.queue.insert(task);
+    this.enqueueOrder.pushTail(task);
+  }
+
+  // Remove from the heap first; only unlink from the intrusive list on a
+  // confirmed hit. heap.delete returns undefined when the id is absent, so this
+  // is idempotent and never double-unlinks a task (which would corrupt the
+  // list's head/tail). Heap and list stay in lockstep, so heap-has <=> list-has.
+  private _dequeue(task: QueuedTask): void {
+    if (this.queue.delete(task.id) !== undefined) this.enqueueOrder.remove(task);
+  }
+
+  /*
   Task Terminal Handlers
   */
 
   private _onTaskTimeout(task: QueuedTask, reject: (err: Error) => void): void {
-    this.queue.delete(task.id);
-    this.queueAge.invalidate();
+    this._dequeue(task);
     this.totalTimeouts++;
     this.circuit.recordTimeout();
     this.backoff.onTimeout();
@@ -263,8 +287,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   }
 
   private _onTaskAbort(task: QueuedTask, reject: (err: Error) => void): void {
-    this.queue.delete(task.id);
-    this.queueAge.invalidate();
+    this._dequeue(task);
     if (task.isProbe) this.circuit.releaseProbeSlot();
     this.metricsCollector?.onAbort(Date.now(), this.queue.size);
     this.emit(SemaphoreEvents.TASKABORT);
@@ -320,7 +343,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         if (!this.permits.hasCapacityFor(next.weight)) break;
 
         const task = this.queue.pop()!;
-        this.queueAge.invalidate();
+        this.enqueueOrder.remove(task);
         const now = Date.now();
         const waitMs = Math.max(0, now - task.enqueueTime);
         this.permits.acquire(task.weight);
@@ -363,19 +386,28 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   private _purgeStaleTasks(): void {
     const now = Date.now();
     const before = this.queue.size;
-    const stale = this.queue.toArray().filter(t => now - t.enqueueTime > this.queueMaxAge);
 
-    for (const task of stale) {
-      if (!this.queue.has(task.id)) continue;
-      if (this.circuit.probeTaskId === task.id) this.circuit.releaseProbeSlot();
-      const discarded = task.discard(new SemaphoreError(`Task purged after ${this.queueMaxAge}ms`, 'PURGED'));
-      if (!discarded) continue;
-      this.queue.delete(task.id);
-      this.queueAge.invalidate();
-      this.totalTimeouts++;
-      this.metricsCollector?.onTimeout(Date.now(), this.queue.size);
-      this.emit(SemaphoreEvents.QUEUEPURGE, task);
-      if (this.debug) console.warn(`[Semaphore] Purged stale task #${task.id}`);
+    // enqueueOrder is strictly enqueue-ordered head -> tail, so ages are
+    // monotonically non-increasing along it: the head is the oldest task. Walk
+    // from the head and stop at the first task still young enough to keep —
+    // nothing behind it can be older. This touches only the tasks actually
+    // purged (O(s)) instead of scanning the whole queue every tick (O(N)).
+    let head = this.enqueueOrder.peekHead();
+    while (head !== undefined && now - head.enqueueTime > this.queueMaxAge) {
+      if (this.circuit.probeTaskId === head.id) this.circuit.releaseProbeSlot();
+      const discarded = head.discard(new SemaphoreError(`Task purged after ${this.queueMaxAge}ms`, 'PURGED'));
+      // `head` is a confirmed list member (just peeked), so unlink it directly:
+      // every iteration removes the current head, which guarantees the loop
+      // advances (and terminates) without relying on the heap/list lockstep.
+      this.queue.delete(head.id);
+      this.enqueueOrder.remove(head);
+      if (discarded) {
+        this.totalTimeouts++;
+        this.metricsCollector?.onTimeout(Date.now(), this.queue.size);
+        this.emit(SemaphoreEvents.QUEUEPURGE, head);
+        if (this.debug) console.warn(`[Semaphore] Purged stale task #${head.id}`);
+      }
+      head = this.enqueueOrder.peekHead();
     }
 
     if (this.debug && this.queue.size < before) {
@@ -468,8 +500,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       if (isProbe) this.circuit.claimProbeSlot(taskId);
 
       this.metricsCollector?.sampleQueueDepthAt(Date.now(), this.queue.size + 1);
-      this.queue.insert(task);
-      this.queueAge.onInsert(enqueueTime);
+      this._enqueue(task);
       this.schedule();
     });
   }
@@ -524,11 +555,11 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   public reset(options: { clearListeners?: boolean } = {}): void {
     for (const task of this.queue.toArray()) task.discard(new SemaphoreError('Semaphore reset', 'SHUTDOWN'));
     this.queue.clear();
+    this.enqueueOrder.clear();
     this.metricsCollector?.reset();
     this.permits.reset();
     this.backoff.reset();
     this.circuit.reset();
-    this.queueAge.reset();
     // Invalidate any release closure minted before this reset, and clear the
     // outstanding count.
     this.releaseGeneration++;
@@ -559,9 +590,9 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.isShutdown = true;
     if (this.debug) console.info(`[Semaphore] Shutdown: ${reason}`);
     if (this.purgeIntervalId !== null) { clearInterval(this.purgeIntervalId); this.purgeIntervalId = null; }
-    this.queueAge.invalidate();
     for (const task of this.queue.toArray()) task.discard(new SemaphoreError(reason, 'SHUTDOWN'));
     this.queue.clear();
+    this.enqueueOrder.clear();
     this.metricsCollector?.destroy();
     if (this.drainResolve) { this.drainResolve(); this.drainResolve = null; this.drainPromise = null; }
     this.emit(SemaphoreEvents.SHUTDOWN, reason);
@@ -577,9 +608,8 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     for (const task of tasks) {
       if (task.isProbe) this.circuit.releaseProbeSlot();
       task.discard(new SemaphoreError('Semaphore acquire cancelled', 'CANCELLED'));
-      this.queue.delete(task.id);
+      this._dequeue(task);
     }
-    this.queueAge.invalidate();
     this.metricsCollector?.sampleQueueDepthAt(Date.now(), this.queue.size);
     if (this.debug) console.info(`[Semaphore] Cancelled ${tasks.length} queued tasks`);
     // Re-arm the scheduler so a pending drain() resolves: emptying the queue may
@@ -600,6 +630,9 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     const oneMin = windowStats?.windows?.['1m']?.counts;
     const acquired1m = oneMin?.acquired ?? 0;
     const timeout1m  = oneMin?.timeouts ?? 0;
+    // O(1): the enqueue-ordered list's head is always the oldest queued task.
+    const oldest = this.enqueueOrder.peekHead();
+    const queueAge = oldest === undefined ? 0 : Math.max(0, Date.now() - oldest.enqueueTime);
     return {
       status: {
         running:          this.permits.capacity - this.permits.available,
@@ -615,8 +648,8 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         timeoutRate1m: (acquired1m + timeout1m) > 0
           ? +((timeout1m / (acquired1m + timeout1m)) * 100).toFixed(1)
           : 0,
-        /** Age in ms of the oldest queued task. O(1) when cache is warm, O(N) after removals. */
-        queueAge: this.queueAge.ageMs(this.queue.toArray()),
+        /** Age in ms of the oldest queued task. O(1). */
+        queueAge,
       },
       lifetime: {
         totalAcquired:  this.totalAcquired,

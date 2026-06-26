@@ -9,36 +9,36 @@ const task = (over: Partial<Task> = {}): Task => ({
 });
 
 describe('QUEUE_ORDERINGS', () => {
-  it('fifo: priority primary, earliest id first on ties', () => {
+  it('fifo: orders by id ascending, priority disregarded', () => {
     const cmp = QUEUE_ORDERINGS.fifo;
-    expect(cmp(task({ priority: 1 }), task({ priority: 2 }))).toBeLessThan(0);
-    expect(cmp(task({ id: 1 }), task({ id: 2 }))).toBeLessThan(0); // earlier first
-  });
-
-  it('lifo: priority primary, latest id first on ties', () => {
-    const cmp = QUEUE_ORDERINGS.lifo;
-    expect(cmp(task({ priority: 1 }), task({ priority: 2 }))).toBeLessThan(0);
-    expect(cmp(task({ id: 1 }), task({ id: 2 }))).toBeGreaterThan(0); // later first
-  });
-
-  it('fifoIgnorePriority: orders by id ascending, priority disregarded', () => {
-    const cmp = QUEUE_ORDERINGS.fifoIgnorePriority;
     // lower priority does NOT win when it was enqueued later
     expect(cmp(task({ id: 1, priority: 9 }), task({ id: 2, priority: 0 }))).toBeLessThan(0);
     expect(cmp(task({ id: 2 }), task({ id: 1 }))).toBeGreaterThan(0);
   });
 
-  it('lifoIgnorePriority: orders by id descending, priority disregarded', () => {
-    const cmp = QUEUE_ORDERINGS.lifoIgnorePriority;
+  it('lifo: orders by id descending, priority disregarded', () => {
+    const cmp = QUEUE_ORDERINGS.lifo;
     // higher priority does NOT win when it was enqueued earlier
     expect(cmp(task({ id: 2, priority: 9 }), task({ id: 1, priority: 0 }))).toBeLessThan(0);
     expect(cmp(task({ id: 1 }), task({ id: 2 }))).toBeGreaterThan(0);
   });
+
+  it('fifoWithPriority: priority primary, earliest id first on ties', () => {
+    const cmp = QUEUE_ORDERINGS.fifoWithPriority;
+    expect(cmp(task({ priority: 1 }), task({ priority: 2 }))).toBeLessThan(0);
+    expect(cmp(task({ id: 1 }), task({ id: 2 }))).toBeLessThan(0); // earlier first
+  });
+
+  it('lifoWithPriority: priority primary, latest id first on ties', () => {
+    const cmp = QUEUE_ORDERINGS.lifoWithPriority;
+    expect(cmp(task({ priority: 1 }), task({ priority: 2 }))).toBeLessThan(0);
+    expect(cmp(task({ id: 1 }), task({ id: 2 }))).toBeGreaterThan(0); // later first
+  });
 });
 
 describe('resolveComparator', () => {
-  it('defaults to fifo', () => {
-    expect(resolveComparator({})).toBe(QUEUE_ORDERINGS.fifo);
+  it('defaults to fifoWithPriority', () => {
+    expect(resolveComparator({})).toBe(QUEUE_ORDERINGS.fifoWithPriority);
   });
 
   it('selects the named preset', () => {
@@ -69,10 +69,10 @@ describe('buildComparator probe-first invariant', () => {
     expect(cmp(task({ id: 99, isProbe: false }), task({ id: 1, isProbe: true }))).toBeGreaterThan(0);
   });
 
-  it('keeps probe-first under the IgnorePriority presets (which drop priority)', () => {
+  it('keeps probe-first under the priority-less presets (which drop priority)', () => {
     // These presets ignore priority, so the probe's MIN_SAFE_INTEGER priority is
     // no help — the wrapper is the only thing keeping it at the head.
-    for (const order of ['fifoIgnorePriority', 'lifoIgnorePriority'] as const) {
+    for (const order of ['fifo', 'lifo'] as const) {
       const cmp = buildComparator<Task>({ queueOrder: order });
       expect(cmp(task({ id: 50, isProbe: true }), task({ id: 1, isProbe: false }))).toBeLessThan(0);
       expect(cmp(task({ id: 1, isProbe: false }), task({ id: 50, isProbe: true }))).toBeGreaterThan(0);

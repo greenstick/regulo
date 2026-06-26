@@ -1,13 +1,17 @@
 /*
 Queue Ordering
 
-Encapsulates how queued tasks are ordered for dispatch. Priority is always the
-primary key (lower priority value dispatches first); an ordering decides how to
-break ties among equal-priority tasks.
+Encapsulates how queued tasks are ordered for dispatch. Priority and arrival
+order are two independent axes:
+  - 'fifo' / 'lifo' order purely by arrival (enqueue) time; priority is not
+    consulted.
+  - 'fifoWithPriority' / 'lifoWithPriority' make priority the primary key (lower
+    priority value dispatches first) and break equal-priority ties by arrival.
+The default is 'fifoWithPriority', so the `priority` argument to acquire() is
+honored out of the box.
 
 Two layers:
-  QUEUE_ORDERINGS  — named presets ('fifo' | 'lifo') keyed for the `queueOrder`
-                     config option.
+  QUEUE_ORDERINGS  — named presets keyed for the `queueOrder` config option.
   buildComparator  — resolves the configured ordering (named preset or a custom
                      `comparator`) and wraps it so probe tasks always sort first.
 
@@ -21,16 +25,16 @@ never has to know probes exist.
 
 import type { Comparator, QueueOrder, QueuedTaskView } from './types';
 
-/** Built-in orderings, keyed by `queueOrder`. Each keeps priority primary. */
+/** Built-in orderings, keyed by `queueOrder`. */
 export const QUEUE_ORDERINGS: Record<QueueOrder, Comparator<QueuedTaskView>> = {
-  // Earliest-enqueued first (stable, head-of-line fair) with priority.
-  fifo: (a, b) => (a.priority - b.priority) || (a.id - b.id),
-  // Latest-enqueued first with priority.
-  lifo: (a, b) => (a.priority - b.priority) || (b.id - a.id),
-  // Earliest-enqueued first (stable, head-of-line fair) without priority.
-  fifoIgnorePriority: (a, b) => (a.id - b.id),
-  // Latest-enqueued first without priority.
-  lifoIgnorePriority: (a, b) => (b.id - a.id),
+  // Earliest-enqueued first (stable, head-of-line fair); priority ignored.
+  fifo: (a, b) => (a.id - b.id),
+  // Latest-enqueued first; priority ignored.
+  lifo: (a, b) => (b.id - a.id),
+  // Priority primary, earliest-enqueued first on ties (stable, head-of-line fair).
+  fifoWithPriority: (a, b) => (a.priority - b.priority) || (a.id - b.id),
+  // Priority primary, latest-enqueued first on ties.
+  lifoWithPriority: (a, b) => (a.priority - b.priority) || (b.id - a.id),
 };
 
 export interface OrderingConfig {
@@ -55,7 +59,7 @@ export function resolveComparator(config: OrderingConfig): Comparator<QueuedTask
     }
     return config.comparator;
   }
-  const order = config.queueOrder ?? 'fifo';
+  const order = config.queueOrder ?? 'fifoWithPriority';
   const cmp = QUEUE_ORDERINGS[order];
   if (cmp === undefined) {
     throw new Error(

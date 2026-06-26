@@ -68,6 +68,19 @@ describe('Semaphore', () => {
       r1(); r2();
       expect(sem.status().status.pendingReleases).toBe(0);
     });
+
+    it('status().status.queueAge reports the oldest queued task and clears as it drains', async () => {
+      const sem = make(1);
+      const r = await sem.acquire();
+      expect(sem.status().status.queueAge).toBe(0); // empty queue
+      const oldest = sem.acquire().then(rel => rel());
+      const newer = sem.acquire().then(rel => rel());
+      // Oldest task has waited at least as long as the newer one (>= 0).
+      expect(sem.status().status.queueAge).toBeGreaterThanOrEqual(0);
+      r();
+      await Promise.all([oldest, newer]);
+      expect(sem.status().status.queueAge).toBe(0); // drained back to empty
+    });
   });
 
   // ─── tryAcquire ────────────────────────────────────────────────────────────
@@ -121,6 +134,17 @@ describe('Semaphore', () => {
       (await _p1)();
     });
 
+    it('defaults queueMaxLength to 1024 (finite guardrail)', async () => {
+      const sem = make(1); // no queueMaxLength set
+      const r = await sem.acquire();
+      const pending = Array.from({ length: 1024 }, () => sem.acquire().catch(() => {}));
+      // The 1025th queued acquire exceeds the default ceiling.
+      await expect(sem.acquire()).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+      sem.cancel();
+      r();
+      await Promise.all(pending);
+    });
+
     it('dispatches in priority order', async () => {
       const sem = make(1);
       const r1 = await sem.acquire();
@@ -159,31 +183,32 @@ describe('Semaphore', () => {
       return order;
     }
 
-    it("queueOrder 'fifo' is the default ordering", async () => {
-      expect(await collectOrder(make(1), 6)).toEqual([0, 1, 2, 3, 4, 5]);
+    it("'fifoWithPriority' is the default ordering and honors priority", async () => {
+      // Default honors priority: descending priorities dispatch lowest-first.
+      const order = await collectOrder(make(1), 4, [3, 2, 1, 0]);
+      expect(order).toEqual([3, 2, 1, 0]);
     });
 
-    it("queueOrder 'lifo' dispatches equal priority latest-first", async () => {
-      const order = await collectOrder(make(1, { queueOrder: 'lifo' }), 6);
-      expect(order).toEqual([5, 4, 3, 2, 1, 0]);
+    it("'fifoWithPriority' breaks equal-priority ties earliest-first", async () => {
+      expect(await collectOrder(make(1, { queueOrder: 'fifoWithPriority' }), 6)).toEqual([0, 1, 2, 3, 4, 5]);
     });
 
-    it("'lifo' still honors priority as the primary key", async () => {
+    it("'lifoWithPriority' honors priority as the primary key", async () => {
       // priorities: lower number dispatched first; ties broken latest-first.
-      const order = await collectOrder(make(1, { queueOrder: 'lifo' }), 4, [1, 0, 0, 1]);
+      const order = await collectOrder(make(1, { queueOrder: 'lifoWithPriority' }), 4, [1, 0, 0, 1]);
       // priority 0 group first (indices 1,2 -> latest-first 2,1), then priority 1 group (0,3 -> 3,0)
       expect(order).toEqual([2, 1, 3, 0]);
     });
 
-    it("'fifoIgnorePriority' dispatches enqueue-order regardless of priority", async () => {
-      // Descending priorities would reorder under 'fifo'; here they're ignored.
-      const order = await collectOrder(make(1, { queueOrder: 'fifoIgnorePriority' }), 4, [3, 2, 1, 0]);
+    it("'fifo' dispatches enqueue-order regardless of priority", async () => {
+      // Descending priorities would reorder under 'fifoWithPriority'; here they're ignored.
+      const order = await collectOrder(make(1, { queueOrder: 'fifo' }), 4, [3, 2, 1, 0]);
       expect(order).toEqual([0, 1, 2, 3]);
     });
 
-    it("'lifoIgnorePriority' dispatches reverse-enqueue-order regardless of priority", async () => {
-      // Ascending priorities would keep order under 'lifo'+priority; here ignored.
-      const order = await collectOrder(make(1, { queueOrder: 'lifoIgnorePriority' }), 4, [0, 1, 2, 3]);
+    it("'lifo' dispatches reverse-enqueue-order regardless of priority", async () => {
+      // Ascending priorities would keep order under 'lifoWithPriority'; here ignored.
+      const order = await collectOrder(make(1, { queueOrder: 'lifo' }), 4, [0, 1, 2, 3]);
       expect(order).toEqual([3, 2, 1, 0]);
     });
 

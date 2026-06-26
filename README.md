@@ -72,29 +72,53 @@ Capabilities reflect each project's commonly documented feature set at the time 
 
 **Priority queue** — queued callers are dispatched in ascending priority order (lower number = higher priority — the front burner). Default priority is `0`. Dispatch is head-of-line fair: once any caller is queued, later callers always queue behind it rather than grabbing a free permit, so a lower-priority or lighter task can never jump ahead of a waiting higher-priority or heavier one.
 
-**Queue ordering** — `queueOrder` selects a dispatch preset. `'fifo'` (the default) and `'lifo'` keep priority as the primary sort key and break equal-priority ties earliest- or latest-enqueued first, respectively. `'fifoIgnorePriority'` and `'lifoIgnorePriority'` drop priority entirely and order purely by enqueue time. For full control, pass a `comparator` (lower sorts/dispatches first), which overrides `queueOrder`:
+**Queue ordering** — `queueOrder` selects a dispatch preset. Priority and arrival order are two independent axes. `'fifoWithPriority'` (the default) and `'lifoWithPriority'` keep priority as the primary sort key and break equal-priority ties earliest- or latest-enqueued first. `'fifo'` and `'lifo'` drop priority entirely and order purely by enqueue time. For full control, pass a `comparator` (lower sorts/dispatches first), which overrides `queueOrder`:
 
 ```ts
 import { Semaphore, QUEUE_ORDERINGS } from 'regulo';
 
-// Built-in preset
+// Built-in preset — pure arrival order, priority ignored
 const a = new Semaphore(4, { queueOrder: 'lifo' });
 
-// Custom: priority first, then heaviest work first, then FIFO. The receiver is a
+// Custom: priority first, then lightest work first, then FIFO. The receiver is a
 // read-only QueuedTaskView ({ id, priority, enqueueTime, weight }); `id`
 // increases with enqueue order. Probe tasks are always dispatched first
 // regardless of your comparator, so you never need to handle them.
 const b = new Semaphore(4, {
-  comparator: (x, y) => (x.priority - y.priority) || (y.weight - x.weight) || (x.id - y.id),
+  comparator: (x, y) => (x.priority - y.priority) || (x.weight - y.weight) || (x.id - y.id),
 });
 
 // Compose with a preset
-const c = new Semaphore(4, { comparator: QUEUE_ORDERINGS.lifo });
+const c = new Semaphore(4, { comparator: QUEUE_ORDERINGS.lifoWithPriority });
 ```
+
+See [Choosing an ordering](#choosing-an-ordering-and-its-implications) for how the ordering interacts with weighted permits and head-of-line dispatch — the choice has real throughput consequences under mixed weights.
 
 **Circuit breaker** — watches for saturation and takes the pot off the heat when the system can't keep up. See the dedicated section below for exactly what it measures.
 
 **Backoff** — exponential backoff eases dispatch down to a simmer during sustained timeout bursts. The delay grows on each timeout and decays continuously over time, throttling dispatch while downstream systems recover and returning to zero on its own once the burst subsides. The current delay is exposed in `status()` and `TASKTIMEOUT` events.
+
+## 🧭 Choosing an ordering, and its implications
+
+Two facts are true of **every** ordering, because they live in the scheduler, not the comparator:
+
+1. **Dispatch follows the configured order strictly.** Whatever sorts to the head dispatches next; nothing behind it jumps ahead (head-of-line fairness).
+2. **The scheduler will not dispatch *past* a head that doesn't fit.** With [weighted permits](#core-concepts), if the head needs more permits than are currently free, the scheduler waits for capacity to accumulate rather than skipping to a lighter task behind it. A free permit can therefore sit idle while the head waits. This prevents a lighter/lower-priority task from starving a heavier/higher-priority one — but under a wide weight distribution it can also stall throughput while the head waits.
+
+That second rule is where the **comparator choice matters**: the rule is fixed, but *which task ends up at the head* — and therefore how often the stall bites — is entirely up to your ordering.
+
+| `queueOrder` | Dispatches first | Head-of-line stall exposure under mixed weights |
+|---|---|---|
+| `fifoWithPriority` (default) | lowest priority value, ties earliest-first | A heavy task only holds the line while it is genuinely the highest-priority (or earliest equal-priority) waiter |
+| `lifoWithPriority` | lowest priority value, ties latest-first | Same, but equal-priority ties favor the newest |
+| `fifo` | earliest enqueued (priority ignored) | Classic head-of-line: whoever arrived first holds the line until it fits |
+| `lifo` | latest enqueued (priority ignored) | The newest arrival holds the line until it fits |
+| custom, **heaviest-first** | heaviest weight | **Worst case** — deliberately parks the heaviest task at the head, maximizing the stall |
+| custom, **lightest-first** | lightest weight | Minimizes stalls — light work drains while capacity accumulates for heavy work |
+
+If you mix many light acquires with a few heavy ones and care about throughput, prefer a **lightest-first tiebreaker** (e.g. `(a, b) => (a.priority - b.priority) || (a.weight - b.weight) || (a.id - b.id)`), or give each weight class its **own `Semaphore`** so a heavy head in one pool can't stall the other. Conversely, if you must not let light work starve heavy work, the default's strict behavior is what you want.
+
+> **Weight is a cost multiplier, not a task-type selector.** `weight` exists to say "this unit of work costs N burners," for work drawing on the **same** resource pool and **same** failure domain. Don't use weight (or priority) to multiplex unrelated task types or downstreams through one `Semaphore` — the breaker and backoff are shared across everything in the instance (see [Caveats](#caveats)). Use one `Semaphore` per resource instead.
 
 ## 💡 How the circuit breaker works
 
@@ -226,7 +250,7 @@ Standard event emitter interface. See [Events reference](#events-reference) belo
 
 Returns a snapshot of current operating state. See [`status()` output](#status-output) for the full shape.
 
-> `status()` calls `queue.toArray()` internally, which is O(N) in the queue depth. Rate-limit calls in high-frequency scrape paths.
+> `status()` is O(1) in queue depth — safe to call on a metrics scrape path. (Queue age is read from an enqueue-ordered index, not by scanning the queue.)
 
 ### `isAvailable(): boolean`
 
@@ -244,7 +268,7 @@ Number of permits not currently held.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `queueMaxLength` | `number` | `Number.MAX_SAFE_INTEGER` | Max tasks that may wait in the queue (positive integer; effectively unbounded by default) |
+| `queueMaxLength` | `number` | `1024` | Max tasks that may wait in the queue; further acquires reject with `QUEUE_FULL`. Positive integer; pass `Number.MAX_SAFE_INTEGER` for an effectively unbounded queue |
 | `queueMaxTimeout` | `number` | `10000` | ms a queued task waits before `TIMEOUT` |
 | `queueMaxAge` | `number` | `30000` | ms before the purge interval ejects a task regardless of its own timeout |
 | `rejectOnFull` | `boolean` | `false` | Reject immediately when all permits are held (no queuing) |
@@ -258,7 +282,7 @@ Number of permits not currently held.
 | `backoffDecayFactor` | `number` | `0.5` | Backoff decay factor per idle second, in `(0,1)` |
 | `purgeIntervalMs` | `number` | `3000` | ms between stale-task purge sweeps. Min: `500` |
 | `metricsEnabled` | `boolean` | `true` | Enable windowed metrics collection |
-| `queueOrder` | `'fifo' \| 'lifo' \| 'fifoIgnorePriority' \| 'lifoIgnorePriority'` | `'fifo'` | Queue dispatch order. `fifo`/`lifo` keep priority primary; the `*IgnorePriority` variants order purely by enqueue time. Ignored if `comparator` is set |
+| `queueOrder` | `'fifo' \| 'lifo' \| 'fifoWithPriority' \| 'lifoWithPriority'` | `'fifoWithPriority'` | Queue dispatch order. `fifo`/`lifo` order purely by enqueue time; the `*WithPriority` variants make priority primary and break ties by enqueue time. See [Choosing an ordering](#choosing-an-ordering-and-its-implications). Ignored if `comparator` is set |
 | `comparator` | `(a, b) => number` | — | Custom ordering over queued tasks (lower sorts/dispatches first); overrides `queueOrder` |
 | `debug` | `boolean` | `false` | Enable debug logging and the permit-pool invariant check. Does not gate events — all events fire regardless |
 
@@ -269,7 +293,7 @@ import { Semaphore, type SemaphoreConfig } from 'regulo';
 
 const config: SemaphoreConfig = {
   // Queue
-  queueMaxLength: Number.MAX_SAFE_INTEGER, // effectively unbounded; min 1
+  queueMaxLength: 1024,                     // max waiting tasks before QUEUE_FULL; min 1
   queueMaxTimeout: 10000,                  // ms a queued task waits before TIMEOUT; min 1
   queueMaxAge: 30000,                      // ms before the purge sweep ejects a task; min 1
   rejectOnFull: false,                     // true = no queuing; reject when all permits held
@@ -288,7 +312,7 @@ const config: SemaphoreConfig = {
   metricsEnabled: true,                    // windowed metrics collection
   debug: false,                            // debug logging + permit-pool invariant check
   // Ordering
-  queueOrder: 'fifo',                      // 'fifo' | 'lifo' | 'fifoIgnorePriority' | 'lifoIgnorePriority'
+  queueOrder: 'fifoWithPriority',          // 'fifo' | 'lifo' | 'fifoWithPriority' | 'lifoWithPriority'
   // comparator: undefined,                // no default — if set, overrides queueOrder
 };
 
@@ -423,18 +447,18 @@ concurrency, the circuit breakers on per-call overhead.
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `tryAcquire` + `release` | 2.19M | 2.36x slower |
-| `tryAcquire` + `release` (no metrics) | 5.19M | fastest |
-| `use()` round-trip | 1.13M | 4.60x slower |
-| `use()` round-trip (no metrics) | 1.77M | 2.92x slower |
+| `tryAcquire` + `release` | 2.02M | 2.34x slower |
+| `tryAcquire` + `release` (no metrics) | 4.73M | fastest |
+| `use()` round-trip | 1.03M | 4.61x slower |
+| `use()` round-trip (no metrics) | 1.59M | 2.98x slower |
 
 **🎛️ Weighted acquire, uncontended**
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `use()` weight=1 | 1.16M | 1.04x slower |
-| `use()` weight=4 | 1.19M | 1.01x slower |
-| `use()` weight=16 | 1.21M | fastest |
+| `use()` weight=1 | 988.8k | 1.03x slower |
+| `use()` weight=4 | 1.02M | 1.00x slower |
+| `use()` weight=16 | 1.02M | fastest |
 
 Weighted permits add no meaningful overhead regardless of weight — claiming
 16 burners at once costs about the same as claiming one.
@@ -443,50 +467,52 @@ Weighted permits add no meaningful overhead regardless of weight — claiming
 
 | Scenario | tasks/sec | vs. fastest |
 |---|--:|---|
-| concurrency=4 | 469.1k | 1.22x slower |
-| concurrency=16 | 562.5k | 1.02x slower |
-| concurrency=64 | 571.5k | fastest |
-| concurrency=16, random priority | 498.0k | 1.15x slower |
+| concurrency=4 | 427.1k | 1.13x slower |
+| concurrency=16 | 482.5k | fastest |
+| concurrency=64 | 476.1k | 1.01x slower |
+| concurrency=16, random priority | 411.0k | 1.17x slower |
 
 **📈 `status()` snapshot cost**
 
 | Queue depth | ops/sec | vs. fastest |
 |---|--:|---|
-| 0 | 740.1k | fastest |
-| 100 | 678.0k | 1.09x slower |
-| 1000 | 498.1k | 1.49x slower |
+| 0 | 701.2k | 1.00x slower |
+| 100 | 704.5k | fastest |
+| 1000 | 694.9k | 1.01x slower |
 
-`status()` is O(N) in queue depth (see [Caveats](#caveats)) — the cost climbs
-gradually as the queue grows, roughly 1.5x slower at 1000 queued tasks versus
-an empty queue.
+`status()` is O(1) in queue depth — the cost is flat across queue depths (within
+run-to-run noise) because queue age is read from an enqueue-ordered index rather
+than by cloning and scanning the queue. Earlier releases were O(N) here; that
+cost is gone, so `status()` is safe to call on a metrics scrape path even with
+thousands of tasks queued.
 
 **📊 regulo vs. other libraries — uncontended round-trip**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 4.13M | fastest |
-| p-queue | 1.22M | 3.40x slower |
-| p-limit | 1.17M | 3.54x slower |
-| regulo (no metrics) | 1.57M | 2.63x slower |
-| regulo | 1.02M | 4.05x slower |
+| cockatiel (bulkhead) | 3.73M | fastest |
+| p-queue | 1.12M | 3.33x slower |
+| p-limit | 1.10M | 3.38x slower |
+| regulo (no metrics) | 1.48M | 2.52x slower |
+| regulo | 986.6k | 3.78x slower |
 
 **📊 regulo vs. other libraries — contended throughput @ concurrency=16** (tasks/sec)
 
 | Library | tasks/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 1.72M | fastest |
-| p-queue | 1.05M | 1.64x slower |
-| p-limit | 883.6k | 1.95x slower |
-| regulo (no metrics) | 622.4k | 2.76x slower |
-| regulo | 493.3k | 3.49x slower |
+| cockatiel (bulkhead) | 1.85M | fastest |
+| p-queue | 995.7k | 1.86x slower |
+| p-limit | 871.2k | 2.12x slower |
+| regulo (no metrics) | 546.2k | 3.39x slower |
+| regulo | 450.4k | 4.11x slower |
 
 **🛡️ Circuit breaker overhead — closed/healthy circuit**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| regulo `CircuitBreaker` | 3.71M | fastest |
-| cockatiel (circuitBreaker) | 2.79M | 1.33x slower |
-| opossum | 1.62M | 2.29x slower |
+| regulo `CircuitBreaker` | 3.47M | fastest |
+| cockatiel (circuitBreaker) | 2.50M | 1.39x slower |
+| opossum | 1.49M | 2.32x slower |
 
 The picture is consistent. Cockatiel's bulkhead is the fastest limiter — and
 **Regulo** trades raw limiter throughput for an integrated priority heap, weighted
@@ -510,24 +536,26 @@ npx vitest run --coverage
 ```
 
 ```
- ✓ test/queue.test.ts (11 tests)
+ ✓ test/queue.test.ts (7 tests)
  ✓ test/metrics.test.ts (18 tests)
  ✓ test/breaker.test.ts (21 tests)
  ✓ test/permit.test.ts (14 tests)
  ✓ test/backoff.test.ts (6 tests)
  ✓ test/ordering.test.ts (13 tests)
  ✓ test/heap.test.ts (8 tests)
- ✓ test/semaphore.test.ts (88 tests)
+ ✓ test/list.test.ts (8 tests)
+ ✓ test/semaphore.test.ts (90 tests)
 
- Test Files  8 passed (8)
-      Tests  179 passed (179)
+ Test Files  9 passed (9)
+      Tests  185 passed (185)
 ```
 
 ## ⚠️ Caveats
 
 Before you crank the dial, know where the edges are:
 
-- **`status()` is O(N)** in the queue depth due to `queue.toArray()`. Do not call it in tight loops under heavy load.
+- **One `Semaphore` is one failure domain.** The circuit breaker and adaptive backoff are per-instance and shared across everything routed through it, so a saturation event on one dependency trips the breaker for *all* work in that instance. Don't multiplex unrelated downstreams or task types through a single `Semaphore` (and don't use `weight`/`priority` to fake it) — use one `Semaphore` per protected resource, or one capacity pool plus a standalone [`CircuitBreaker`](#standalone-circuitbreaker) per downstream key. See [Choosing an ordering](#choosing-an-ordering-and-its-implications).
+- **A free permit can sit idle behind a heavier head.** The scheduler never dispatches past a head that doesn't fit, so under [weighted permits](#core-concepts) one heavy task at the head can stall throughput even when there's capacity for the lighter tasks behind it. This is by design (it stops light work starving heavy work); how often it bites depends on your ordering — see [Choosing an ordering](#choosing-an-ordering-and-its-implications).
 - **`drain()` without a timeout can block indefinitely** if a permit holder never releases. Always pass `timeoutMs` in graceful-shutdown paths.
 - **The circuit breaker is a saturation breaker.** It trips on queue-acquisition timeouts, not on errors thrown by your operation. See [How the circuit breaker works](#how-the-circuit-breaker-works).
 

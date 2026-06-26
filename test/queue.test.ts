@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { QueuedTask, QueueAgeCache } from '../src/queue';
+import { QueuedTask } from '../src/queue';
 
 function makeTask(id = 1, opts: Partial<ConstructorParameters<typeof QueuedTask>[0]> = {}) {
   let _resolve: (r: () => void) => void = () => {};
@@ -77,43 +77,5 @@ describe('QueuedTask', () => {
     task.dispatch(() => vi.fn());
     controller.abort(); // listener already removed
     expect(onAbort).not.toHaveBeenCalled();
-  });
-});
-
-describe('QueueAgeCache', () => {
-  beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
-
-  it('ageMs returns 0 for empty task list', () => {
-    expect(new QueueAgeCache().ageMs([])).toBe(0);
-  });
-
-  it('ageMs reflects oldest enqueue time', () => {
-    const cache = new QueueAgeCache();
-    const now = Date.now();
-    vi.setSystemTime(now);
-    cache.onInsert(now - 500);
-    cache.onInsert(now - 200);
-    // Cache is warm — pass a dummy non-empty array; cache serves the stored value
-    const dummy = [{ enqueueTime: now - 200 }] as any;
-    expect(cache.ageMs(dummy)).toBe(500);
-  });
-
-  it('invalidate triggers rescan on next ageMs call', () => {
-    const cache = new QueueAgeCache();
-    const now = Date.now();
-    vi.setSystemTime(now);
-    const { task: t1 } = makeTask(1, { enqueueTime: now - 1000 });
-    const { task: t2 } = makeTask(2, { enqueueTime: now - 500 });
-    cache.onInsert(now - 1000);
-    cache.invalidate();
-    expect(cache.ageMs([t2])).toBe(500); // rescan, only t2 present
-  });
-
-  it('reset clears the cache', () => {
-    const cache = new QueueAgeCache();
-    cache.onInsert(Date.now() - 1000);
-    cache.reset();
-    expect(cache.ageMs([])).toBe(0);
   });
 });

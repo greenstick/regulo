@@ -3,7 +3,7 @@ Semaphore
 */
 
 export interface SemaphoreConfig {
-  /** Maximum number of tasks that may wait in the queue. Must be a positive integer; pass a large value such as `Number.MAX_SAFE_INTEGER` for an effectively unbounded queue. Default: Number.MAX_SAFE_INTEGER */
+  /** Maximum number of tasks that may wait in the queue. Once full, further acquires reject with `QUEUE_FULL`. Must be a positive integer; pass a large value such as `Number.MAX_SAFE_INTEGER` for an effectively unbounded queue. Default: 1024 */
   queueMaxLength?: number;
   /** Milliseconds a queued task waits before rejecting with TIMEOUT. Default: 10000 */
   queueMaxTimeout?: number;
@@ -35,11 +35,12 @@ export interface SemaphoreConfig {
   debug?: boolean;
   /**
    * Dispatch ordering for queued tasks. Ignored when `comparator` is provided.
-   * - 'fifo' (default): priority primary, earliest-enqueued first on ties.
-   * - 'lifo': priority primary, latest-enqueued first on ties.
-   * - 'fifoIgnorePriority': earliest-enqueued first, priority ignored.
-   * - 'lifoIgnorePriority': latest-enqueued first, priority ignored.
-   * Default: 'fifo'
+   * Priority and arrival order are independent axes:
+   * - 'fifo': earliest-enqueued first; priority ignored.
+   * - 'lifo': latest-enqueued first; priority ignored.
+   * - 'fifoWithPriority' (default): priority primary, earliest-enqueued first on ties.
+   * - 'lifoWithPriority': priority primary, latest-enqueued first on ties.
+   * Default: 'fifoWithPriority'
    */
   queueOrder?: QueueOrder;
   /**
@@ -52,10 +53,11 @@ export interface SemaphoreConfig {
 }
 
 /**
- * Dispatch ordering presets. The `*IgnorePriority` variants drop the priority
- * key entirely and order purely by enqueue time.
+ * Dispatch ordering presets. `fifo`/`lifo` order purely by enqueue time; the
+ * `*WithPriority` variants make priority the primary key and break ties by
+ * enqueue time.
  */
-export type QueueOrder = 'fifo' | 'lifo' | 'fifoIgnorePriority' | 'lifoIgnorePriority';
+export type QueueOrder = 'fifo' | 'lifo' | 'fifoWithPriority' | 'lifoWithPriority';
 
 /**
  * Read-only view of a queued task exposed to custom comparators. `id` is a

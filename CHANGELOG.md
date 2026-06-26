@@ -5,7 +5,55 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2026-06-25
+## [v1.0.4] - 2026-06-26
+
+### Changed (BREAKING)
+
+- **Renamed the queue-ordering presets** so priority is an explicit, named axis
+  rather than an implicit default. `queueOrder` values are now:
+  `'fifo'` / `'lifo'` (order purely by enqueue time, priority ignored) and
+  `'fifoWithPriority'` / `'lifoWithPriority'` (priority primary, enqueue-time
+  tie-break). Previously `'fifo'`/`'lifo'` were priority-primary and the
+  priority-less variants were `'fifoIgnorePriority'`/`'lifoIgnorePriority'`.
+  Migration: `'fifo'` → `'fifoWithPriority'`, `'lifo'` → `'lifoWithPriority'`,
+  `'fifoIgnorePriority'` → `'fifo'`, `'lifoIgnorePriority'` → `'lifo'`.
+- **Default `queueOrder` is now `'fifoWithPriority'`** (was `'fifo'`). Dispatch
+  behavior with no `queueOrder` set is unchanged — priority is still honored by
+  default — but the default's *name* changed.
+- **`queueMaxLength` now defaults to `1024`** (was `Number.MAX_SAFE_INTEGER`,
+  i.e. effectively unbounded). Once the queue is full, further `acquire()` calls
+  reject with `QUEUE_FULL`. This adds a finite back-pressure guardrail by
+  default; pass `queueMaxLength: Number.MAX_SAFE_INTEGER` to restore the previous
+  unbounded behavior.
+
+### Performance
+
+- **`status()` is now O(1) in queue depth** (was O(N)). Queue age is read from a
+  new enqueue-ordered index instead of cloning and scanning the queue, so
+  `status()` is safe to call on a metrics scrape path even with deep queues. The
+  `status()` snapshot benchmark is now flat across queue depths.
+- **The stale-task purge sweep is now O(s)** in the number of tasks actually
+  evicted per tick (was O(N) every tick), by walking the enqueue-ordered index
+  from the head and stopping at the first task young enough to keep.
+
+### Internal
+
+- Added `IntrusiveList`, an insertion-ordered index kept alongside the priority
+  heap (pointers stored on the task itself, so no per-task allocation or second
+  map on the hot path), and removed the now-unnecessary `QueueAgeCache`.
+
+### Documentation
+
+- Added a "Choosing an ordering, and its implications" section explaining how
+  ordering interacts with weighted permits and head-of-line dispatch.
+- Documented that a single `Semaphore` is one failure domain (its circuit
+  breaker and backoff are shared across all work routed through it), and that
+  `weight`/`priority` should not be used to multiplex unrelated task types or
+  downstreams through one instance.
+
+[1.0.4]: https://github.com/greenstick/regulo/releases/tag/v1.0.4
+
+## [v1.0.0] - 2026-06-25
 
 First public release, published as `regulo`.
 
