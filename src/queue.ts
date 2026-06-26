@@ -3,18 +3,19 @@ Queued Task
 
 Encapsulates the lifecycle of a single queued acquire() call.
 
-Three terminal paths compete to finalize the task:
+Terminal paths compete to finalize the task exactly once:
   dispatch  — the scheduler pops the task when a permit opens.
-  timeout   — the watchdog timer fires after queueMaxTimeout.
-  abort     — the caller's AbortSignal fires.
+  abort     — the caller's AbortSignal fires (registered here, per task).
+  timeout   — the semaphore's shared deadline watchdog claims the task once its
+              queueMaxTimeout elapses (not a per-task timer; see Semaphore).
+  discard   — bulk teardown (purge / reset / shutdown).
 
-take() is a one-shot gate shared by all three paths. Whichever fires first
-wins; subsequent invocations are no-ops. take() also handles cleanup (clears
-the timer and removes the abort listener) so each path needs no coordination.
-
-The onTimeout and onAbort callbacks run after take() succeeds and are
-responsible for semaphore-level side effects (queue removal, metrics, events,
-and the final Promise rejection).
+claim() is the one-shot gate shared by all of them. Whichever calls it first
+wins; later calls are no-ops. claim() also removes the abort listener, so each
+path needs no coordination. The semaphore-level side effects (queue removal,
+metrics, events, final Promise settlement) run after a successful claim():
+dispatch resolves immediately; the timeout path is staged — the semaphore
+claim()s, runs the breaker/metrics side effects, then reject()s.
 */
 
 export class QueuedTask {
@@ -29,8 +30,12 @@ export class QueuedTask {
   public prev: QueuedTask | null = null;
   public next: QueuedTask | null = null;
 
+  // Intrusive slot for the priority heap (see IndexedBinaryHeap in ./heap): this
+  // task's position in the heap's backing array, or -1 when not queued. Owned
+  // and mutated solely by that heap.
+  public heapIndex = -1;
+
   private completed = false;
-  private timeoutId?: ReturnType<typeof setTimeout>;
   private abortListener?: () => void;
   private readonly abortSignal?: AbortSignal;
   private readonly _resolve: (release: () => void) => void;
@@ -57,17 +62,19 @@ export class QueuedTask {
   }
 
   /**
-   * Register the watchdog timer and abort handler. Must be called before
-   * inserting the task into the queue.
+   * Register the abort handler. Must be called before inserting the task into
+   * the queue.
+   *
+   * The queue-wait timeout is NOT a per-task timer: the semaphore drives it from
+   * a single shared deadline timer keyed on the oldest queued task (see
+   * Semaphore._armTimeout / _fireTimeout). That keeps the hot enqueue/dispatch
+   * path free of a `setTimeout`/`clearTimeout` pair per task. Abort stays
+   * per-task because it is event-driven (an `AbortSignal` listener), not polled.
    */
-  public arm(timeoutMs: number, onTimeout: () => void, onAbort: () => void): void {
-    this.timeoutId = setTimeout(() => {
-      if (this.take()) onTimeout();
-    }, timeoutMs);
-
+  public arm(onAbort: () => void): void {
     if (this.abortSignal) {
       this.abortListener = () => {
-        if (this.take()) onAbort();
+        if (this.claim()) onAbort();
       };
       this.abortSignal.addEventListener('abort', this.abortListener);
     }
@@ -78,7 +85,7 @@ export class QueuedTask {
    * Returns false if the task was already finalized by timeout or abort.
    */
   public dispatch(createRelease: () => () => void): boolean {
-    if (!this.take()) return false;
+    if (!this.claim()) return false;
     this._resolve(createRelease());
     return true;
   }
@@ -88,22 +95,27 @@ export class QueuedTask {
    * Returns false if the task was already finalized.
    */
   public discard(err: Error): boolean {
-    if (!this.take()) return false;
+    if (!this.claim()) return false;
     this._reject(err);
     return true;
   }
 
-  /** Claim this task atomically. Clears timer and abort listener on success. */
-  private take(): boolean {
+  /**
+   * Atomically claim this task (one-shot); removes the abort listener on the
+   * winning call and returns false if some other terminal path got there first.
+   *
+   * Public so the semaphore's shared timeout timer can claim a task, run the
+   * timeout side effects, then reject() it — a staged variant of discard().
+   */
+  public claim(): boolean {
     if (this.completed) return false;
     this.completed = true;
-    if (this.timeoutId !== undefined) {
-      clearTimeout(this.timeoutId);
-      this.timeoutId = undefined;
-    }
     if (this.abortSignal && this.abortListener) {
       this.abortSignal.removeEventListener('abort', this.abortListener);
     }
     return true;
   }
+
+  /** Reject this task's promise. The caller must have won claim() first. */
+  public reject(err: Error): void { this._reject(err); }
 }

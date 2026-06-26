@@ -268,6 +268,46 @@ describe('Semaphore', () => {
       expect(onTimeout).toHaveBeenCalledOnce();
       r();
     });
+
+    // The shared watchdog must preserve per-task timeout precision: a task is not
+    // evicted early just because an earlier task's deadline came due.
+    it('times out each task at its own deadline, not in one coarse batch', async () => {
+      const sem = make(1, { queueMaxTimeout: 100 });
+      const r = await sem.acquire();
+      const aErr = sem.acquire().catch((e: SemaphoreError) => e.code);
+      vi.advanceTimersByTime(40);
+      const bErr = sem.acquire().catch((e: SemaphoreError) => e.code); // enqueued 40ms later
+      vi.advanceTimersByTime(60); // t=100: A's deadline; B still has 40ms to go
+      expect(await aErr).toBe('TIMEOUT');
+      expect(sem.queueLength).toBe(1); // B was NOT evicted early
+      vi.advanceTimersByTime(40); // t=140: B's deadline
+      expect(await bErr).toBe('TIMEOUT');
+      expect(sem.queueLength).toBe(0);
+      r();
+    });
+
+    it('evicts a burst of same-deadline tasks on a single timer fire', async () => {
+      const sem = make(1, { queueMaxTimeout: 100 });
+      const r = await sem.acquire();
+      const errs = Array.from({ length: 5 }, () => sem.acquire().catch((e: SemaphoreError) => e.code));
+      expect(sem.queueLength).toBe(5);
+      vi.advanceTimersByTime(100);
+      expect(await Promise.all(errs)).toEqual(['TIMEOUT', 'TIMEOUT', 'TIMEOUT', 'TIMEOUT', 'TIMEOUT']);
+      expect(sem.queueLength).toBe(0);
+      r();
+    });
+
+    it('does not fire a stray timeout after the queue drains by dispatch', async () => {
+      const sem = make(1, { queueMaxTimeout: 100 });
+      const r = await sem.acquire();
+      const p = sem.acquire();
+      r();                 // release → queued task dispatches before its deadline
+      const release = await p;
+      expect(typeof release).toBe('function'); // got a permit, not a timeout
+      vi.advanceTimersByTime(1000); // well past the old deadline — must be a no-op
+      expect(sem.queueLength).toBe(0);
+      release();
+    });
   });
 
   // ─── AbortSignal ───────────────────────────────────────────────────────────

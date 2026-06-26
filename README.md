@@ -293,7 +293,7 @@ import { Semaphore, type SemaphoreConfig } from 'regulo';
 
 const config: SemaphoreConfig = {
   // Queue
-  queueMaxLength: 1024,                     // max waiting tasks before QUEUE_FULL; min 1
+  queueMaxLength: 1024,                    // max waiting tasks before QUEUE_FULL; min 1
   queueMaxTimeout: 10000,                  // ms a queued task waits before TIMEOUT; min 1
   queueMaxAge: 30000,                      // ms before the purge sweep ejects a task; min 1
   rejectOnFull: false,                     // true = no queuing; reject when all permits held
@@ -363,9 +363,9 @@ try {
 } catch (error) {
   if (error instanceof SemaphoreError) {
     switch (error.code) {
-      case 'CIRCUIT_OPEN': // back off and retry later
-      case 'TIMEOUT':      // shed load
-      case 'ABORTED':      // client disconnected
+      case 'CIRCUIT_OPEN':    // back off and retry later
+      case 'TIMEOUT':         // shed load
+      case 'ABORTED':         // client disconnected
     }
   }
 }
@@ -376,17 +376,17 @@ try {
 ```ts
 {
   status: {
-    running: number,          // permits currently held
-    queued: number,           // tasks waiting in queue
-    available: number,        // free permits
-    inFlight: number,         // same as running (alias for clarity)
-    pendingReleases: number,  // outstanding release closures; non-zero means permits are held
+    running: number,           // permits currently held
+    queued: number,            // tasks waiting in queue
+    available: number,         // free permits
+    inFlight: number,          // same as running (alias for clarity)
+    pendingReleases: number,   // outstanding release closures; non-zero means permits are held
     circuitOpen: boolean,
     circuitHalfOpen: boolean,
-    backoffDelay: number,     // current backoff delay (ms) applied to scheduler wakeup
+    backoffDelay: number,      // current backoff delay (ms) applied to scheduler wakeup
     requestsPerSecond: number, // based on 1m window
-    timeoutRate1m: number,    // timeout % over last 1m
-    queueAge: number,         // ms since oldest queued task was enqueued
+    timeoutRate1m: number,     // timeout % over last 1m
+    queueAge: number,          // ms since oldest queued task was enqueued
   },
   lifetime: {
     totalAcquired: number,
@@ -447,18 +447,18 @@ concurrency, the circuit breakers on per-call overhead.
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `tryAcquire` + `release` | 2.02M | 2.34x slower |
-| `tryAcquire` + `release` (no metrics) | 4.73M | fastest |
-| `use()` round-trip | 1.03M | 4.61x slower |
-| `use()` round-trip (no metrics) | 1.59M | 2.98x slower |
+| `tryAcquire` + `release` | 1.96M | 2.40x slower |
+| `tryAcquire` + `release` (no metrics) | 4.71M | fastest |
+| `use()` round-trip | 1.03M | 4.55x slower |
+| `use()` round-trip (no metrics) | 1.49M | 3.15x slower |
 
 **🎛️ Weighted acquire, uncontended**
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `use()` weight=1 | 988.8k | 1.03x slower |
-| `use()` weight=4 | 1.02M | 1.00x slower |
-| `use()` weight=16 | 1.02M | fastest |
+| `use()` weight=1 | 1.05M | fastest |
+| `use()` weight=4 | 1.03M | 1.02x slower |
+| `use()` weight=16 | 1.00M | 1.05x slower |
 
 Weighted permits add no meaningful overhead regardless of weight — claiming
 16 burners at once costs about the same as claiming one.
@@ -467,64 +467,65 @@ Weighted permits add no meaningful overhead regardless of weight — claiming
 
 | Scenario | tasks/sec | vs. fastest |
 |---|--:|---|
-| concurrency=4 | 427.1k | 1.13x slower |
-| concurrency=16 | 482.5k | fastest |
-| concurrency=64 | 476.1k | 1.01x slower |
-| concurrency=16, random priority | 411.0k | 1.17x slower |
+| concurrency=4 | 647.5k | 1.05x slower |
+| concurrency=16 | 669.5k | 1.01x slower |
+| concurrency=64 | 679.0k | fastest |
+| concurrency=16, random priority | 597.2k | 1.14x slower |
 
 **📈 `status()` snapshot cost**
 
 | Queue depth | ops/sec | vs. fastest |
 |---|--:|---|
-| 0 | 701.2k | 1.00x slower |
-| 100 | 704.5k | fastest |
-| 1000 | 694.9k | 1.01x slower |
+| 0 | 675.9k | 1.02x slower |
+| 100 | 686.9k | fastest |
+| 1000 | 665.9k | 1.03x slower |
 
 `status()` is O(1) in queue depth — the cost is flat across queue depths (within
 run-to-run noise) because queue age is read from an enqueue-ordered index rather
-than by cloning and scanning the queue. Earlier releases were O(N) here; that
-cost is gone, so `status()` is safe to call on a metrics scrape path even with
-thousands of tasks queued.
+than by cloning and scanning the queue. `status()` is safe to call on a metrics
+scrape path for arbitrarily long task queues.
 
 **📊 regulo vs. other libraries — uncontended round-trip**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 3.73M | fastest |
-| p-queue | 1.12M | 3.33x slower |
-| p-limit | 1.10M | 3.38x slower |
-| regulo (no metrics) | 1.48M | 2.52x slower |
-| regulo | 986.6k | 3.78x slower |
+| cockatiel (bulkhead) | 3.86M | fastest |
+| p-queue | 1.10M | 3.50x slower |
+| p-limit | 1.09M | 3.55x slower |
+| regulo (no metrics) | 1.46M | 2.65x slower |
+| regulo | 927.7k | 4.16x slower |
 
 **📊 regulo vs. other libraries — contended throughput @ concurrency=16** (tasks/sec)
 
 | Library | tasks/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 1.85M | fastest |
-| p-queue | 995.7k | 1.86x slower |
-| p-limit | 871.2k | 2.12x slower |
-| regulo (no metrics) | 546.2k | 3.39x slower |
-| regulo | 450.4k | 4.11x slower |
+| cockatiel (bulkhead) | 1.64M | fastest |
+| p-queue | 975.6k | 1.68x slower |
+| regulo (no metrics) | 884.1k | 1.85x slower |
+| p-limit | 868.1k | 1.89x slower |
+| regulo | 670.6k | 2.45x slower |
 
 **🛡️ Circuit breaker overhead — closed/healthy circuit**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| regulo `CircuitBreaker` | 3.47M | fastest |
-| cockatiel (circuitBreaker) | 2.50M | 1.39x slower |
-| opossum | 1.49M | 2.32x slower |
+| regulo `CircuitBreaker` | 3.29M | fastest |
+| cockatiel (circuitBreaker) | 2.42M | 1.36x slower |
+| opossum | 1.46M | 2.26x slower |
 
 The picture is consistent. Cockatiel's bulkhead is the fastest limiter — and
 **Regulo** trades raw limiter throughput for an integrated priority heap, weighted
 permits, a saturation breaker, and (by default) windowed metrics in one component.
-On the breaker axis that integration goes the other way: **Regulo**'s standalone
-`CircuitBreaker` is the fastest of the three, because it defers failure
-accounting to an explicit timeout signal instead of bookkeeping a rolling
-window on every call.
+With metrics disabled its contended throughput sits right alongside `p-limit` and
+`p-queue`, so most of the remaining gap to a bare limiter is the windowed metrics
+you can turn off. On the breaker axis the integration goes the other way:
+**Regulo**'s standalone `CircuitBreaker` is the fastest of the three, because it
+defers failure accounting to an explicit timeout signal instead of bookkeeping a
+rolling window on every call.
 
 In practice none of this is the bottleneck. **Regulo** guards work that is *far*
 more expensive than the limiter itself: SSR renders, database queries,
-downstream API calls, measured in milliseconds. Even at ~500k tasks/sec
+downstream API calls, measured in milliseconds. Even at ~670k tasks/sec
 under contention the per-task overhead is a few microseconds against operations
 thousands of times slower. If you only need a bare concurrency cap on cheap
 work in a hot loop, reach for a leaner limiter; see [How it compares](#how-it-compares).
@@ -542,12 +543,12 @@ npx vitest run --coverage
  ✓ test/permit.test.ts (14 tests)
  ✓ test/backoff.test.ts (6 tests)
  ✓ test/ordering.test.ts (13 tests)
- ✓ test/heap.test.ts (8 tests)
+ ✓ test/heap.test.ts (9 tests)
  ✓ test/list.test.ts (8 tests)
- ✓ test/semaphore.test.ts (90 tests)
+ ✓ test/semaphore.test.ts (93 tests)
 
  Test Files  9 passed (9)
-      Tests  185 passed (185)
+      Tests  189 passed (189)
 ```
 
 ## ⚠️ Caveats

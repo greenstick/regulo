@@ -79,6 +79,12 @@ export class Semaphore {
   private drainPromise:    Promise<void> | null = null;
   private drainResolve:    (() => void) | null = null;
   private purgeIntervalId: ReturnType<typeof setInterval> | null = null;
+  // Single shared queue-wait watchdog. Always targets the oldest queued task's
+  // deadline (the head of enqueueOrder, which is the earliest deadline because
+  // every task shares queueMaxTimeout and the list is enqueue-ordered). One
+  // timer replaces the former per-task setTimeout/clearTimeout pair; it is
+  // ref'd, so queued acquires still keep the process alive until they resolve.
+  private timeoutTimerId:  ReturnType<typeof setTimeout> | null = null;
 
 constructor(count: number, config: SemaphoreConfig = {}) {
 
@@ -245,22 +251,77 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   private _enqueue(task: QueuedTask): void {
     this.queue.insert(task);
     this.enqueueOrder.pushTail(task);
+    this._armTimeout();
   }
 
   // Remove from the heap first; only unlink from the intrusive list on a
-  // confirmed hit. heap.delete returns undefined when the id is absent, so this
-  // is idempotent and never double-unlinks a task (which would corrupt the
+  // confirmed hit. heap.delete returns undefined when the task is absent, so
+  // this is idempotent and never double-unlinks a task (which would corrupt the
   // list's head/tail). Heap and list stay in lockstep, so heap-has <=> list-has.
   private _dequeue(task: QueuedTask): void {
-    if (this.queue.delete(task.id) !== undefined) this.enqueueOrder.remove(task);
+    if (this.queue.delete(task) !== undefined) {
+      this.enqueueOrder.remove(task);
+      if (this.enqueueOrder.size === 0) this._clearTimeout();
+    }
+  }
+
+  /*
+  Shared queue-wait watchdog
+
+  One timer, armed for the oldest queued task's deadline. The intrusive list is
+  enqueue-ordered and every task shares queueMaxTimeout, so the head is always
+  the earliest deadline. We arm only when the queue goes non-empty and otherwise
+  let the timer self-correct on fire: dispatching the head leaves the timer
+  pointing at an already-gone deadline, but that deadline is always <= the new
+  head's, so the timer fires early (never late), finds nothing expired, and
+  re-arms. The result is roughly one wakeup per queueMaxTimeout under steady
+  load instead of a timer arm/clear per task.
+  */
+
+  private _armTimeout(): void {
+    if (this.timeoutTimerId !== null) return; // already pending; self-corrects on fire
+    const head = this.enqueueOrder.peekHead();
+    if (head === undefined) return;
+    const delay = Math.max(0, head.enqueueTime + this.queueMaxTimeout - Date.now());
+    this.timeoutTimerId = setTimeout(() => this._fireTimeout(), delay);
+  }
+
+  private _clearTimeout(): void {
+    if (this.timeoutTimerId !== null) {
+      clearTimeout(this.timeoutTimerId);
+      this.timeoutTimerId = null;
+    }
+  }
+
+  private _fireTimeout(): void {
+    this.timeoutTimerId = null;
+    if (this.isShutdown) return;
+    const now = Date.now();
+    let fired = 0;
+    let head = this.enqueueOrder.peekHead();
+    while (head !== undefined && head.enqueueTime + this.queueMaxTimeout <= now) {
+      const claimed = head.claim();
+      this._dequeue(head); // always remove → loop advances; maintains both indexes
+      if (claimed) { this._timeoutTask(head); fired++; }
+      head = this.enqueueOrder.peekHead();
+    }
+    // Re-arm for the next still-waiting task (its deadline is in the future).
+    if (head !== undefined) {
+      const delay = Math.max(0, head.enqueueTime + this.queueMaxTimeout - now);
+      this.timeoutTimerId = setTimeout(() => this._fireTimeout(), delay);
+    }
+    if (fired > 0) this.schedule();
   }
 
   /*
   Task Terminal Handlers
   */
 
-  private _onTaskTimeout(task: QueuedTask, reject: (err: Error) => void): void {
-    this._dequeue(task);
+  // Timeout side effects + reject for a single expired task. The caller
+  // (_fireTimeout) has already claimed and dequeued it, so this only records the
+  // saturation signal (circuit + backoff), emits, and rejects — it does not
+  // touch the queue or re-schedule (the fire loop does that once at the end).
+  private _timeoutTask(task: QueuedTask): void {
     this.totalTimeouts++;
     this.circuit.recordTimeout();
     this.backoff.onTimeout();
@@ -282,8 +343,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.metricsCollector?.onTimeout(Date.now(), this.queue.size);
     this.emit(SemaphoreEvents.TASKTIMEOUT, { queueLength: this.queue.size, backoffDelay: this.backoff.currentDelay, taskId: task.id });
     if (this.debug) console.warn(`[Semaphore] Task #${task.id} timed out after ${this.queueMaxTimeout}ms`);
-    reject(new SemaphoreError(`Semaphore acquire timed out after ${this.queueMaxTimeout}ms (queue: ${this.queue.size})`, 'TIMEOUT'));
-    this.schedule();
+    task.reject(new SemaphoreError(`Semaphore acquire timed out after ${this.queueMaxTimeout}ms (queue: ${this.queue.size})`, 'TIMEOUT'));
   }
 
   private _onTaskAbort(task: QueuedTask, reject: (err: Error) => void): void {
@@ -304,8 +364,9 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   // (sustained timeouts), the wakeup is deferred by the current backoff delay so
   // the dispatch rate slows while the downstream recovers. The `scheduled` flag
   // coalesces concurrent calls regardless of which path armed the wakeup. The
-  // timer is unref'd: queued tasks keep their own (ref'd) watchdog timers alive,
-  // so an unref'd scheduler tick never holds the process open on its own.
+  // timer is unref'd: while tasks are queued the shared (ref'd) timeout watchdog
+  // keeps the process alive, so an unref'd scheduler tick never holds it open on
+  // its own.
   private schedule(): void {
     if (this.scheduled || this.isShutdown) return;
     this.scheduled = true;
@@ -344,6 +405,9 @@ constructor(count: number, config: SemaphoreConfig = {}) {
 
         const task = this.queue.pop()!;
         this.enqueueOrder.remove(task);
+        // Draining to empty cancels the shared watchdog so it doesn't keep the
+        // process alive (or wake it) after there's nothing left to time out.
+        if (this.enqueueOrder.size === 0) this._clearTimeout();
         const now = Date.now();
         const waitMs = Math.max(0, now - task.enqueueTime);
         this.permits.acquire(task.weight);
@@ -396,11 +460,10 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     while (head !== undefined && now - head.enqueueTime > this.queueMaxAge) {
       if (this.circuit.probeTaskId === head.id) this.circuit.releaseProbeSlot();
       const discarded = head.discard(new SemaphoreError(`Task purged after ${this.queueMaxAge}ms`, 'PURGED'));
-      // `head` is a confirmed list member (just peeked), so unlink it directly:
-      // every iteration removes the current head, which guarantees the loop
-      // advances (and terminates) without relying on the heap/list lockstep.
-      this.queue.delete(head.id);
-      this.enqueueOrder.remove(head);
+      // `head` is a confirmed list member (just peeked), so _dequeue removes it
+      // from both indexes and advances the loop, and folds in shared-watchdog
+      // maintenance when this empties the queue.
+      this._dequeue(head);
       if (discarded) {
         this.totalTimeouts++;
         this.metricsCollector?.onTimeout(Date.now(), this.queue.size);
@@ -495,7 +558,9 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       const isProbe = isHalfOpenProbe;
 
       const task = new QueuedTask({ id: taskId, priority: isProbe ? Number.MIN_SAFE_INTEGER : priority, enqueueTime, isProbe, resolve, reject, abortSignal, weight });
-      task.arm(this.queueMaxTimeout, () => this._onTaskTimeout(task, reject), () => this._onTaskAbort(task, reject));
+      // Only the abort listener is per-task; the queue-wait timeout is handled by
+      // the shared watchdog, armed in _enqueue below.
+      task.arm(() => this._onTaskAbort(task, reject));
 
       if (isProbe) this.circuit.claimProbeSlot(taskId);
 
@@ -556,6 +621,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     for (const task of this.queue.toArray()) task.discard(new SemaphoreError('Semaphore reset', 'SHUTDOWN'));
     this.queue.clear();
     this.enqueueOrder.clear();
+    this._clearTimeout();
     this.metricsCollector?.reset();
     this.permits.reset();
     this.backoff.reset();
@@ -590,6 +656,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.isShutdown = true;
     if (this.debug) console.info(`[Semaphore] Shutdown: ${reason}`);
     if (this.purgeIntervalId !== null) { clearInterval(this.purgeIntervalId); this.purgeIntervalId = null; }
+    this._clearTimeout();
     for (const task of this.queue.toArray()) task.discard(new SemaphoreError(reason, 'SHUTDOWN'));
     this.queue.clear();
     this.enqueueOrder.clear();

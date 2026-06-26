@@ -13,50 +13,51 @@ describe('QueuedTask', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
+  // arm() now wires only the abort listener; the queue-wait timeout is driven by
+  // the semaphore's shared watchdog (covered in semaphore.test.ts), not per task.
+
   it('dispatch after arm resolves the promise', async () => {
     const { task, promise } = makeTask();
     const release = vi.fn();
-    task.arm(1000, vi.fn(), vi.fn());
+    task.arm(vi.fn());
     task.dispatch(() => release);
     const r = await promise;
     expect(r).toBe(release);
-  });
-
-  it('timeout fires onTimeout and subsequent dispatch returns false', async () => {
-    const onTimeout = vi.fn();
-    const { task } = makeTask();
-    task.arm(500, onTimeout, vi.fn());
-    vi.advanceTimersByTime(500);
-    expect(onTimeout).toHaveBeenCalledOnce();
-    const dispatched = task.dispatch(() => vi.fn());
-    expect(dispatched).toBe(false);
   });
 
   it('abort fires onAbort and subsequent dispatch returns false', () => {
     const onAbort = vi.fn();
     const controller = new AbortController();
     const { task } = makeTask(1, { abortSignal: controller.signal });
-    task.arm(1000, vi.fn(), onAbort);
+    task.arm(onAbort);
     controller.abort();
     expect(onAbort).toHaveBeenCalledOnce();
     expect(task.dispatch(() => vi.fn())).toBe(false);
   });
 
-  it('whichever of timeout/abort fires first wins; second is a no-op', () => {
-    const onTimeout = vi.fn();
+  it('claim() then reject() finalizes the task (the shared-timeout path)', async () => {
+    const { task, promise } = makeTask();
+    task.arm(vi.fn());
+    expect(task.claim()).toBe(true);
+    task.reject(new Error('timed out'));
+    await expect(promise).rejects.toThrow('timed out');
+    expect(task.dispatch(() => vi.fn())).toBe(false); // already claimed
+  });
+
+  it('claim() wins the race; a later abort is a no-op', () => {
     const onAbort = vi.fn();
     const controller = new AbortController();
     const { task } = makeTask(1, { abortSignal: controller.signal });
-    task.arm(500, onTimeout, onAbort);
-    vi.advanceTimersByTime(500); // timeout wins
-    controller.abort();           // abort arrives second — no-op
-    expect(onTimeout).toHaveBeenCalledOnce();
+    task.arm(onAbort);
+    expect(task.claim()).toBe(true); // e.g. the shared watchdog claims it first
+    controller.abort();              // arrives second
     expect(onAbort).not.toHaveBeenCalled();
+    expect(task.claim()).toBe(false); // second claim loses
   });
 
   it('discard rejects the promise', async () => {
     const { task, promise } = makeTask();
-    task.arm(1000, vi.fn(), vi.fn());
+    task.arm(vi.fn());
     task.discard(new Error('gone'));
     await expect(promise).rejects.toThrow('gone');
   });
@@ -64,7 +65,7 @@ describe('QueuedTask', () => {
   it('discard returns false if already finalized', () => {
     const { task, promise } = makeTask();
     promise.catch(() => {}); // suppress unhandled rejection
-    task.arm(1000, vi.fn(), vi.fn());
+    task.arm(vi.fn());
     task.discard(new Error('first'));
     expect(task.discard(new Error('second'))).toBe(false);
   });
@@ -73,7 +74,7 @@ describe('QueuedTask', () => {
     const controller = new AbortController();
     const onAbort = vi.fn();
     const { task } = makeTask(1, { abortSignal: controller.signal });
-    task.arm(1000, vi.fn(), onAbort);
+    task.arm(onAbort);
     task.dispatch(() => vi.fn());
     controller.abort(); // listener already removed
     expect(onAbort).not.toHaveBeenCalled();

@@ -35,6 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The stale-task purge sweep is now O(s)** in the number of tasks actually
   evicted per tick (was O(N) every tick), by walking the enqueue-ordered index
   from the head and stopping at the first task young enough to keep.
+- **The queue-wait timeout is now driven by a single shared deadline timer**
+  instead of one `setTimeout`/`clearTimeout` per queued task. Because every task
+  shares `queueMaxTimeout` and the enqueue-ordered index is sorted by deadline,
+  the oldest task is always the next to expire, so one self-re-arming timer
+  suffices. Timeout precision and circuit-breaker trip timing are unchanged; the
+  removed per-task timer churn lifts contended throughput by roughly 15–19% and
+  is what makes regulo viable for shorter-duration work (small DB pulls, cache
+  fills) rather than only millisecond-scale operations.
+- **The priority heap's index is now intrusive.** Each task stores its own heap
+  slot (`heapIndex`) instead of the heap maintaining a separate `Map<id, index>`,
+  so every sift writes a plain property instead of a hashed map entry. This lifts
+  contended throughput by a further ~25–30% (deep queues benefit most); with
+  metrics disabled, contended throughput now sits alongside `p-limit`/`p-queue`.
 
 ### Internal
 
