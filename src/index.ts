@@ -17,6 +17,8 @@ export { QUEUE_ORDERINGS } from './ordering';
 export type {
   SemaphoreConfig,
   SemaphoreEventType,
+  SemaphoreEventMap,
+  SemaphoreEventListener,
   SemaphoreErrorCode,
   SemaphoreMetricsSnapshot,
   SemaphoreMetricsWindowSnapshot,

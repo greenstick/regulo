@@ -1,4 +1,4 @@
-# 🎛️ **Regulo**
+# **Regulo**
 
 **🔥 Control the heat**
 
@@ -16,7 +16,7 @@ A concurrency limiter with a built-in circuit breaker, so the expensive parts of
 
 Like the dial on a gas range, **Regulo** sits between incoming work and the burner. Most concurrency libraries just cap how many things run at once and stop there. **Regulo** is built for the case where that limit is protecting something expensive — SSR rendering, a database pool, a downstream API — and you need to watch the flame, send the important pots to the front, and turn things down cleanly before the system scorches.
 
-## ✨ Highlights
+## Highlights
 
 - **🎛️ Bounded concurrency, with priority and weighting** — set how many burners are lit, send important work to the front, and let one heavy job claim more than one burner.
 - **🛡️ Saturation circuit breaker** — when work backs up faster than it clears, **Regulo** takes the pot off the heat: it opens the circuit and sheds load immediately, then probes for recovery and closes again on its own. (See [How the circuit breaker works](#how-the-circuit-breaker-works) — it trips on saturation, not on your operation's errors.)
@@ -26,7 +26,7 @@ Like the dial on a gas range, **Regulo** sits between incoming work and the burn
 - **🪶 Tiny footprint, no supply-chain surface** — roughly 6.6 KB min+gzip (~26 KB minified, ~6.1 KB brotli) with zero runtime dependencies, so there's nothing transitive to audit, update, or trust. Tree-shakeable ESM.
 - **🧯 Production-minded** — graceful `drain()`, `reset()`, `cancel()`, and `shutdown()`; stale-task purging; double-release safety; strict-mode TypeScript types.
 
-## 📦 Install
+## Install
 
 ```bash
 npm install regulo
@@ -34,7 +34,7 @@ npm install regulo
 
 Requires Node.js >= 20 (or any runtime providing `AbortSignal`, `queueMicrotask`, and timers).
 
-## 🚀 Quick start
+## Quick start
 
 ```ts
 import { Semaphore } from 'regulo';
@@ -48,23 +48,7 @@ const result = await semaphore.use(async () => {
 
 `use()` acquires a permit, runs your function, and releases the permit afterward — even if the function throws. The primary export is the `Semaphore` class; `regulo` is the dial wrapped around it.
 
-## ⚖️ How it compares
-
-**Regulo** overlaps with several well-known libraries but sits at the intersection of bounded concurrency, prioritization, and resilience, with built-in observability.
-
-| Capability | regulo | p-limit | p-queue | opossum | cockatiel |
-|---|---|---|---|---|---|
-| Bounded concurrency | Yes | Yes | Yes | No | Yes (bulkhead) |
-| Priority queue | Yes | No | Yes | — | No |
-| Weighted permits | Yes | No | No | — | No |
-| Circuit breaker | Yes | No | No | Yes | Yes |
-| Adaptive backoff | Yes | No | No | No | No |
-| Windowed metrics | Yes | No | Basic | Yes | No |
-| Dependencies | Zero | Minimal | Minimal | Several | Zero |
-
-Capabilities reflect each project's commonly documented feature set at the time of writing; check the respective projects for their current state. If you only need a concurrency cap, `p-limit` is smaller and simpler. If you need rich resilience policy composition (retry, timeout, fallback), `cockatiel` is a strong choice. Reach for `regulo` when you want prioritized, weighted concurrency limiting that you can monitor and that protects itself under sustained load.
-
-## 🎯 Core concepts
+## Core concepts
 
 **Semaphore** — holds a fixed pool of permits (the burners). Callers acquire a permit before doing work and release it when done. When all permits are held, callers queue until one frees up, or until their timeout fires.
 
@@ -98,7 +82,7 @@ See [Choosing an ordering](#choosing-an-ordering-and-its-implications) for how t
 
 **Backoff** — exponential backoff eases dispatch down to a simmer during sustained timeout bursts. The delay grows on each timeout and decays continuously over time, throttling dispatch while downstream systems recover and returning to zero on its own once the burst subsides. The current delay is exposed in `status()` and `TASKTIMEOUT` events.
 
-## 🧭 Choosing an ordering, and its implications
+## Choosing an Ordering and Its Implications
 
 Two facts are true of **every** ordering, because they live in the scheduler, not the comparator:
 
@@ -120,7 +104,7 @@ If you mix many light acquires with a few heavy ones and care about throughput, 
 
 > **Weight is a cost multiplier, not a task-type selector.** `weight` exists to say "this unit of work costs N burners," for work drawing on the **same** resource pool and **same** failure domain. Don't use weight (or priority) to multiplex unrelated task types or downstreams through one `Semaphore` — the breaker and backoff are shared across everything in the instance (see [Caveats](#caveats)). Use one `Semaphore` per resource instead.
 
-## 💡 How the circuit breaker works
+## How the Circuit Breaker Works
 
 The breaker is a **saturation breaker, not a fault breaker**. It watches the rate of *queue-acquisition timeouts* — callers that waited longer than `queueMaxTimeout` for a permit — over a sliding window. When that rate crosses `circuitBreakerThreshold` (and the minimum count guards are met), the circuit opens and new requests are rejected immediately with `CIRCUIT_OPEN`. After the cooldown elapses, one probe request is allowed through; if it succeeds the circuit closes, if it times out the circuit re-opens and the cooldown restarts.
 
@@ -131,7 +115,7 @@ What this means in practice:
 
 If you also need to trip on downstream *errors* (not just saturation), pair the semaphore with a conventional fault breaker around your operation, or use the standalone [`CircuitBreaker`](#standalone-circuitbreaker) and feed it your own failure signal.
 
-## 🥘 Recipe: Express middleware
+## Example: Express Middleware
 
 Cap concurrent handling of an expensive route and shed load with a `503` when the circuit is open or the queue is full:
 
@@ -191,7 +175,7 @@ reports.on(SemaphoreEvents.CIRCUITOPEN, ({ timeoutRate }) => logger.warn(`report
 reports.on(SemaphoreEvents.CIRCUITCLOSE, () => logger.info('reports limiter recovered'));
 ```
 
-## 📚 API reference
+## API Reference
 
 ### `new Semaphore(count, config?)`
 
@@ -214,57 +198,57 @@ try {
 }
 ```
 
-### `use<T>(fn, abortSignal?, priority?, weight?): Promise<T>`
+#### `use<T>(fn, abortSignal?, priority?, weight?): Promise<T>`
 
 Preferred entry point. Acquires a permit, runs `fn()`, and releases — always, even if `fn` throws.
 
-### `tryAcquire(weight?): (() => void) | null`
+#### `tryAcquire(weight?): (() => void) | null`
 
 Non-blocking. Returns a release closure, or `null` if insufficient permits are available **or any tasks are already queued** (head-of-line fairness — `tryAcquire` never jumps the queue).
 
 - `weight` — Permits to consume (integer in `1..count`). Defaults to `1`. Invalid weights return `null`.
 
-### `drain(timeoutMs?): Promise<void>`
+#### `drain(timeoutMs?): Promise<void>`
 
-Resolves when the queue is empty and all permits are returned. Multiple callers share the same promise. Pass `timeoutMs` (a positive integer) to set a deadline — rejects with `TIMEOUT` if not idle in time; an invalid value throws synchronously.
+Resolves when the queue is empty and all permits are returned. Multiple callers share the same promise. Pass `timeoutMs` (a positive integer) to set a deadline — rejects with `TIMEOUT` if not idle in time; an invalid value throws `SemaphoreError` (`INVALID_ARGUMENT`) synchronously. Calling `drain()` after `shutdown()` rejects with `SHUTDOWN`.
 
 > Without `timeoutMs`, `drain()` can block indefinitely if a caller holds a permit and never releases it.
 
-### `reset(options?): void`
+#### `reset(options?): void`
 
-Rejects all queued tasks (`SHUTDOWN`) and restores the semaphore to its initial state. Event listeners are preserved unless `{ clearListeners: true }` is passed.
+Rejects all queued tasks (`SHUTDOWN`) and restores the semaphore to its initial state, so it can be reused. Event listeners are preserved unless `{ clearListeners: true }` is passed. Throws `SemaphoreError` (`SHUTDOWN`) if called after `shutdown()` — a shut-down instance is terminal and cannot be revived.
 
-### `cancel(): void`
+#### `cancel(): void`
 
 Rejects all currently queued tasks with `CANCELLED`. In-flight permits are unaffected and the semaphore remains fully operational (unlike `shutdown()`).
 
-### `shutdown(reason?): void`
+#### `shutdown(reason?): void`
 
-Permanently stops the semaphore — kills the gas. All queued tasks are rejected. Unlike `reset()`, this cannot be reversed.
+Permanently stops the semaphore — kills the gas. All queued tasks are rejected, the purge interval is cleared, and metrics collection stops. This is terminal: it cannot be reversed, and a later `reset()` on a shut-down instance throws rather than reviving it. Calling `shutdown()` again is a no-op.
 
-### `on(event, listener) / off(event, listener) / removeAllListeners(event?)`
+#### `on(event, listener) / off(event, listener) / removeAllListeners(event?)`
 
-Standard event emitter interface. See [Events reference](#events-reference) below.
+Standard event emitter interface. Listeners are fully typed — the payload type is inferred from the event, so `on(SemaphoreEvents.TASKACQUIRE, p => …)` gives `p` the correct shape with no `any`. See [Events reference](#events-reference) below.
 
-### `status()`
+#### `status()`
 
-Returns a snapshot of current operating state. See [`status()` output](#status-output) for the full shape.
+Returns a snapshot of current operating state. See [Metrics](#metrics) for the full shape.
 
 > `status()` is O(1) in queue depth — safe to call on a metrics scrape path. (Queue age is read from an enqueue-ordered index, not by scanning the queue.)
 
-### `isAvailable(): boolean`
+#### `isAvailable(): boolean`
 
 Returns `true` if the semaphore is not shut down, the circuit is not open, and a permit is available.
 
-### `queueLength: number`
+#### `queueLength: number`
 
 Current number of tasks waiting for a permit.
 
-### `availablePermits: number`
+#### `availablePermits: number`
 
 Number of permits not currently held.
 
-## ⚙️ Configuration reference
+## Configuration Reference
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -319,9 +303,9 @@ const config: SemaphoreConfig = {
 const semaphore = new Semaphore(10, config);
 ```
 
-## ⇄ Events reference
+## Events Reference
 
-Listen with `Semaphore.on(SemaphoreEvents.CIRCUITOPEN, handler)`.
+Listen with `Semaphore.on(SemaphoreEvents.CIRCUITOPEN, handler)`. Payloads are typed per event (see `SemaphoreEventMap`); a handler's argument is inferred from the event constant.
 
 | Event constant | String value | Payload |
 |---|---|---|
@@ -329,27 +313,28 @@ Listen with `Semaphore.on(SemaphoreEvents.CIRCUITOPEN, handler)`.
 | `TASKRELEASE` | `'task-release'` | `{ queued, running }` |
 | `TASKTIMEOUT` | `'task-timeout'` | `{ queueLength, backoffDelay, taskId }` |
 | `TASKABORT` | `'task-abort'` | none |
-| `QUEUEPURGE` | `'queue-purge'` | `QueuedTask` |
+| `QUEUEPURGE` | `'queue-purge'` | `QueuedTaskView` — `{ id, priority, enqueueTime, weight }` |
 | `CIRCUITOPEN` | `'circuit-open'` | `{ timeoutRate, recentTimeouts, total, reason? }` |
 | `CIRCUITHALFOPEN` | `'circuit-half-open'` | none |
 | `CIRCUITCLOSE` | `'circuit-close'` | none |
 | `SHUTDOWN` | `'shutdown'` | `reason: string` |
 
-## 🚨 Error codes
+## Error Codes
 
-All rejections are `SemaphoreError` instances with a `code` property.
+Every error **Regulo** raises — whether rejected from a promise or thrown synchronously — is a `SemaphoreError` instance with a `code` property you can switch on.
 
-| Code | When thrown |
+| Code | When raised |
 |---|---|
 | `CIRCUIT_OPEN` | Circuit breaker is open |
 | `CIRCUIT_HALF_OPEN` | Circuit is half-open and a probe is already in flight |
+| `INVALID_ARGUMENT` | Invalid constructor/config value, or an invalid `drain()` timeout (thrown synchronously) |
 | `INVALID_WEIGHT` | `weight` is not an integer in `1..count` |
 | `INVALID_PRIORITY` | `priority` is not a finite number |
 | `QUEUE_FULL` | `rejectOnFull` is true, or `queueMaxLength` is exceeded |
 | `TIMEOUT` | Task waited longer than `queueMaxTimeout`; or `drain()` exceeded its deadline |
 | `ABORTED` | Caller's `AbortSignal` fired |
 | `CANCELLED` | Task was rejected by `cancel()` |
-| `SHUTDOWN` | `shutdown()` or `reset()` was called while the task was queued |
+| `SHUTDOWN` | `shutdown()` or `reset()` was called while the task was queued; or `reset()`/`drain()` was called on an already shut-down instance |
 | `PURGED` | Task was ejected by the stale-task purge interval (`queueMaxAge` exceeded) |
 
 ```ts
@@ -371,8 +356,9 @@ try {
 }
 ```
 
-## `status()` output
+## Metrics
 
+Generated with `status()`.
 ```ts
 {
   status: {
@@ -398,7 +384,7 @@ try {
 }
 ```
 
-## 🔌 Standalone `CircuitBreaker`
+## Standalone `CircuitBreaker`
 
 `CircuitBreaker` can be used independently — e.g. to wrap an HTTP client. Unlike the semaphore's saturation breaker, here you decide what counts as a failure by calling `recordTimeout()` on whatever signal you choose:
 
@@ -434,12 +420,28 @@ async function fetch(url: string) {
 }
 ```
 
-## ⚡ Benchmarks
+## Feature Comparison
+
+**Regulo** overlaps with several well-known libraries but sits at the intersection of bounded concurrency, prioritization, and resilience, with built-in observability.
+
+| Capability | regulo | p-limit | p-queue | opossum | cockatiel |
+|---|---|---|---|---|---|
+| Bounded concurrency | Yes | Yes | Yes | No | Yes (bulkhead) |
+| Priority queue | Yes | No | Yes | — | No |
+| Weighted permits | Yes | No | No | — | No |
+| Circuit breaker | Yes | No | No | Yes | Yes |
+| Adaptive backoff | Yes | No | No | No | No |
+| Windowed metrics | Yes | No | Basic | Yes | No |
+| Dependencies | Zero | Minimal | Minimal | Several | Zero |
+
+Capabilities reflect each project's commonly documented feature set at the time of writing; check the respective projects for their current state. If you only need a concurrency cap, `p-limit` is smaller and simpler. If you need rich resilience policy composition (retry, timeout, fallback), `cockatiel` is a strong choice. Reach for `regulo` when you want prioritized, weighted concurrency limiting that you can monitor and that protects itself under sustained load.
+
+## Benchmarks
 
 Full, reproducible benchmarks live in [`benchmarks/`](./benchmarks) — run them
 yourself with `npm run benchmark:all`. Figures below are from a real run on
 Node v22.16.0, darwin x64, mid-2018 Intel i9 Macbook Pro; your numbers will differ — re-run locally. Each
-library from [How it compares](#how-it-compares) is benchmarked only on the
+library from [Feature comparison](#feature-comparison) is benchmarked only on the
 axis it actually shares with **Regulo**: the concurrency limiters on capping
 concurrency, the circuit breakers on per-call overhead.
 
@@ -447,18 +449,18 @@ concurrency, the circuit breakers on per-call overhead.
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `tryAcquire` + `release` | 1.96M | 2.40x slower |
-| `tryAcquire` + `release` (no metrics) | 4.71M | fastest |
-| `use()` round-trip | 1.03M | 4.55x slower |
-| `use()` round-trip (no metrics) | 1.49M | 3.15x slower |
+| `tryAcquire` + `release` | 2.22M | 2.29x slower |
+| `tryAcquire` + `release` (no metrics) | 5.10M | fastest |
+| `use()` round-trip | 1.10M | 4.65x slower |
+| `use()` round-trip (no metrics) | 1.70M | 3.01x slower |
 
 **🎛️ Weighted acquire, uncontended**
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `use()` weight=1 | 1.05M | fastest |
-| `use()` weight=4 | 1.03M | 1.02x slower |
-| `use()` weight=16 | 1.00M | 1.05x slower |
+| `use()` weight=1 | 1.19M | fastest |
+| `use()` weight=4 | 1.17M | 1.02x slower |
+| `use()` weight=16 | 1.17M | 1.01x slower |
 
 Weighted permits add no meaningful overhead regardless of weight — claiming
 16 burners at once costs about the same as claiming one.
@@ -467,18 +469,18 @@ Weighted permits add no meaningful overhead regardless of weight — claiming
 
 | Scenario | tasks/sec | vs. fastest |
 |---|--:|---|
-| concurrency=4 | 647.5k | 1.05x slower |
-| concurrency=16 | 669.5k | 1.01x slower |
-| concurrency=64 | 679.0k | fastest |
-| concurrency=16, random priority | 597.2k | 1.14x slower |
+| concurrency=4 | 726.4k | 1.11x slower |
+| concurrency=16 | 779.4k | 1.03x slower |
+| concurrency=64 | 805.5k | fastest |
+| concurrency=16, random priority | 684.2k | 1.18x slower |
 
 **📈 `status()` snapshot cost**
 
 | Queue depth | ops/sec | vs. fastest |
 |---|--:|---|
-| 0 | 675.9k | 1.02x slower |
-| 100 | 686.9k | fastest |
-| 1000 | 665.9k | 1.03x slower |
+| 0 | 720.7k | 1.02x slower |
+| 100 | 731.9k | fastest |
+| 1000 | 729.4k | 1.00x slower |
 
 `status()` is O(1) in queue depth — the cost is flat across queue depths (within
 run-to-run noise) because queue age is read from an enqueue-ordered index rather
@@ -489,29 +491,29 @@ scrape path for arbitrarily long task queues.
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 3.86M | fastest |
-| p-queue | 1.10M | 3.50x slower |
-| p-limit | 1.09M | 3.55x slower |
-| regulo (no metrics) | 1.46M | 2.65x slower |
-| regulo | 927.7k | 4.16x slower |
+| cockatiel (bulkhead) | 4.00M | fastest |
+| p-limit | 1.21M | 3.32x slower |
+| p-queue | 1.20M | 3.34x slower |
+| regulo (no metrics) | 1.57M | 2.54x slower |
+| regulo | 1.05M | 3.82x slower |
 
 **📊 regulo vs. other libraries — contended throughput @ concurrency=16** (tasks/sec)
 
 | Library | tasks/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 1.64M | fastest |
-| p-queue | 975.6k | 1.68x slower |
-| regulo (no metrics) | 884.1k | 1.85x slower |
-| p-limit | 868.1k | 1.89x slower |
-| regulo | 670.6k | 2.45x slower |
+| cockatiel (bulkhead) | 1.69M | fastest |
+| p-queue | 1.07M | 1.58x slower |
+| regulo (no metrics) | 982.7k | 1.72x slower |
+| p-limit | 870.5k | 1.94x slower |
+| regulo | 753.8k | 2.24x slower |
 
 **🛡️ Circuit breaker overhead — closed/healthy circuit**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| regulo `CircuitBreaker` | 3.29M | fastest |
-| cockatiel (circuitBreaker) | 2.42M | 1.36x slower |
-| opossum | 1.46M | 2.26x slower |
+| regulo `CircuitBreaker` | 3.64M | fastest |
+| cockatiel (circuitBreaker) | 2.68M | 1.36x slower |
+| opossum | 1.57M | 2.33x slower |
 
 The picture is consistent. Cockatiel's bulkhead is the fastest limiter — and
 **Regulo** trades raw limiter throughput for an integrated priority heap, weighted
@@ -525,12 +527,12 @@ rolling window on every call.
 
 In practice none of this is the bottleneck. **Regulo** guards work that is *far*
 more expensive than the limiter itself: SSR renders, database queries,
-downstream API calls, measured in milliseconds. Even at ~670k tasks/sec
+downstream API calls, measured in milliseconds. Even at ~750k tasks/sec
 under contention the per-task overhead is a few microseconds against operations
 thousands of times slower. If you only need a bare concurrency cap on cheap
-work in a hot loop, reach for a leaner limiter; see [How it compares](#how-it-compares).
+work in a hot loop, reach for a leaner limiter; see [Feature comparison](#feature-comparison).
 
-## 🧪 Test coverage
+## Test coverage
 
 ```
 npx vitest run --coverage
@@ -545,13 +547,13 @@ npx vitest run --coverage
  ✓ test/ordering.test.ts (13 tests)
  ✓ test/heap.test.ts (9 tests)
  ✓ test/list.test.ts (8 tests)
- ✓ test/semaphore.test.ts (93 tests)
+ ✓ test/semaphore.test.ts (95 tests)
 
  Test Files  9 passed (9)
-      Tests  189 passed (189)
+      Tests  191 passed (191)
 ```
 
-## ⚠️ Caveats
+## Caveats
 
 Before you crank the dial, know where the edges are:
 
@@ -560,6 +562,6 @@ Before you crank the dial, know where the edges are:
 - **`drain()` without a timeout can block indefinitely** if a permit holder never releases. Always pass `timeoutMs` in graceful-shutdown paths.
 - **The circuit breaker is a saturation breaker.** It trips on queue-acquisition timeouts, not on errors thrown by your operation. See [How the circuit breaker works](#how-the-circuit-breaker-works).
 
-## 📜 License
+## License
 
 [MIT](./LICENSE)

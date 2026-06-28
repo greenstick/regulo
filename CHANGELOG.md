@@ -5,6 +5,73 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.1.0] - 2026-06-28
+
+### Added
+
+- **Typed event payloads.** `on()` and `off()` are now generic over the event
+  name, so a listener's argument is inferred from the event (no more `any`).
+  Exposed via the new `SemaphoreEventMap` and `SemaphoreEventListener<E>` types,
+  both exported from the package entry point. Emitted payloads are unchanged;
+  this is purely a compile-time improvement.
+- **`INVALID_ARGUMENT` error code** for argument and configuration validation,
+  so these failures can be distinguished programmatically via `error.code` like
+  every other rejection.
+
+### Changed
+
+- **Argument and configuration validation now throws `SemaphoreError`** (with
+  code `INVALID_ARGUMENT`) instead of a plain `Error`. This covers the
+  `Semaphore` constructor, the `CircuitBreaker`/`BackoffTracker` config checks,
+  the `queueOrder`/`comparator` checks, and an invalid `drain()` timeout. Because
+  `SemaphoreError extends Error`, existing `instanceof Error` and `toThrow()`
+  handling is unaffected.
+- **`reset()` now throws `SemaphoreError('SHUTDOWN')` when called on a
+  shut-down instance** instead of silently reviving it. This makes `shutdown()`
+  genuinely terminal, matching its documented "cannot be reversed" contract. If
+  you previously relied on `reset()` to restart a shut-down semaphore, construct
+  a new instance instead.
+
+### Performance
+
+- **`emit()` skips the defensive listener-array snapshot when a single listener
+  is registered** (the common case), invoking it directly. Multi-listener
+  emission still snapshots to stay safe against mid-emit mutation.
+
+### Internal
+
+- Added a `branches: 85` coverage threshold (alongside the existing `lines: 90`)
+  so a branch-coverage regression is caught in CI.
+
+### Documentation
+
+- Corrected several broken in-page anchor links and heading typos, refreshed the
+  events/error-code references for the typed events and `INVALID_ARGUMENT` code,
+  and clarified the `reset()`/`shutdown()`/`drain()` semantics.
+- Refreshed all benchmark tables with a new run (Node v22.16.0, darwin x64).
+
+[1.1.0]: https://github.com/greenstick/regulo/releases/tag/v1.1.0
+
+## [v1.0.5] - 2026-06-26
+
+### Performance
+
+- **The queue-wait timeout is now driven by a single shared deadline timer**
+  instead of one `setTimeout`/`clearTimeout` per queued task. Because every task
+  shares `queueMaxTimeout` and the enqueue-ordered index is sorted by deadline,
+  the oldest task is always the next to expire, so one self-re-arming timer
+  suffices. Timeout precision and circuit-breaker trip timing are unchanged; the
+  removed per-task timer churn lifts contended throughput by roughly 15–19% and
+  is what makes regulo viable for shorter-duration work (small DB pulls, cache
+  fills) rather than only millisecond-scale operations.
+- **The priority heap's index is now intrusive.** Each task stores its own heap
+  slot (`heapIndex`) instead of the heap maintaining a separate `Map<id, index>`,
+  so every sift writes a plain property instead of a hashed map entry. This lifts
+  contended throughput by a further ~25–30% (deep queues benefit most); with
+  metrics disabled, contended throughput now sits alongside `p-limit`/`p-queue`.
+
+[1.0.5]: https://github.com/greenstick/regulo/releases/tag/v1.0.5
+
 ## [v1.0.4] - 2026-06-26
 
 ### Changed (BREAKING)
@@ -35,19 +102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The stale-task purge sweep is now O(s)** in the number of tasks actually
   evicted per tick (was O(N) every tick), by walking the enqueue-ordered index
   from the head and stopping at the first task young enough to keep.
-- **The queue-wait timeout is now driven by a single shared deadline timer**
-  instead of one `setTimeout`/`clearTimeout` per queued task. Because every task
-  shares `queueMaxTimeout` and the enqueue-ordered index is sorted by deadline,
-  the oldest task is always the next to expire, so one self-re-arming timer
-  suffices. Timeout precision and circuit-breaker trip timing are unchanged; the
-  removed per-task timer churn lifts contended throughput by roughly 15–19% and
-  is what makes regulo viable for shorter-duration work (small DB pulls, cache
-  fills) rather than only millisecond-scale operations.
-- **The priority heap's index is now intrusive.** Each task stores its own heap
-  slot (`heapIndex`) instead of the heap maintaining a separate `Map<id, index>`,
-  so every sift writes a plain property instead of a hashed map entry. This lifts
-  contended throughput by a further ~25–30% (deep queues benefit most); with
-  metrics disabled, contended throughput now sits alongside `p-limit`/`p-queue`.
 
 ### Internal
 

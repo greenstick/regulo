@@ -33,6 +33,16 @@ describe('Semaphore', () => {
     ])('throws on invalid config: %s', (_, fn) => {
       expect(fn).toThrow();
     });
+
+    it('throws SemaphoreError with code INVALID_ARGUMENT', () => {
+      expect(() => new Semaphore(0)).toThrow(
+        expect.objectContaining({ name: 'SemaphoreError', code: 'INVALID_ARGUMENT' })
+      );
+      // @ts-expect-error invalid preset
+      expect(() => make(1, { queueOrder: 'bogus' })).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+      );
+    });
   });
 
   // ─── Fast-path acquire/release ─────────────────────────────────────────────
@@ -530,11 +540,13 @@ describe('Semaphore', () => {
       await expect(sem.drain()).rejects.toMatchObject({ code: 'SHUTDOWN' });
     });
 
-    it('throws on an invalid timeoutMs', () => {
+    it('throws SemaphoreError(INVALID_ARGUMENT) on an invalid timeoutMs', () => {
       const sem = make(1);
-      expect(() => sem.drain(0)).toThrow();
-      expect(() => sem.drain(-5)).toThrow();
-      expect(() => sem.drain(1.5)).toThrow();
+      for (const bad of [0, -5, 1.5]) {
+        expect(() => sem.drain(bad)).toThrow(
+          expect.objectContaining({ name: 'SemaphoreError', code: 'INVALID_ARGUMENT' })
+        );
+      }
     });
   });
 
@@ -584,6 +596,15 @@ describe('Semaphore', () => {
       const d = sem.drain();
       sem.reset();
       await expect(d).resolves.toBeUndefined();
+    });
+
+    it('refuses to revive a shut-down semaphore', () => {
+      const sem = make(1);
+      sem.shutdown();
+      expect(() => sem.reset()).toThrow(
+        expect.objectContaining({ name: 'SemaphoreError', code: 'SHUTDOWN' })
+      );
+      expect(sem.isAvailable()).toBe(false);
     });
   });
 

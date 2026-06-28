@@ -19,6 +19,7 @@ usable as a standalone primitive.
 */
 
 import { validateNumber } from "./validation";
+import { SemaphoreError } from './error';
 
 import type { CircuitState, CircuitBreakerConfig, CircuitTripResult } from './types';
 
@@ -106,7 +107,7 @@ export class CircuitBreaker {
 
     // Integrated Cross-Checks
     if (this.minThroughput < this.minFailures) {
-      throw new Error("CircuitBreaker minThroughput must be >= minFailures");
+      throw new SemaphoreError("CircuitBreaker minThroughput must be >= minFailures", 'INVALID_ARGUMENT');
     }
   }
 

@@ -17,6 +17,7 @@ bursts compound (little decay between them); spaced-out timeouts barely move it.
 */
 
 import { validateNumber } from "./validation";
+import { SemaphoreError } from './error';
 
 import type { BackoffConfig } from './types';
 
@@ -40,7 +41,7 @@ export class BackoffTracker {
 
     // Integrated Cross-Checks
     if (this.maxTimeout < this.initialTimeout) {
-      throw new Error("BackoffTracker maxTimeout must be >= initialTimeout");
+      throw new SemaphoreError("BackoffTracker maxTimeout must be >= initialTimeout", 'INVALID_ARGUMENT');
     }
 
   }

@@ -37,7 +37,7 @@ import { SemaphoreMetrics } from './metrics';
 import { buildComparator } from './ordering';
 import { SemaphoreEvents } from './types';
 
-import type { SemaphoreConfig, SemaphoreEventType, SemaphoreMetricsSnapshot } from './types';
+import type { SemaphoreConfig, SemaphoreEventType, SemaphoreEventMap, SemaphoreEventListener, SemaphoreMetricsSnapshot } from './types';
 
 export class Semaphore {
 
@@ -75,7 +75,7 @@ export class Semaphore {
   private totalAcquired    = 0;
   private totalReleased    = 0;
   private totalTimeouts    = 0;
-  private eventListeners   = new Map<string, Set<(...args: any[]) => void>>();
+  private eventListeners   = new Map<SemaphoreEventType, Set<(...args: any[]) => void>>();
   private drainPromise:    Promise<void> | null = null;
   private drainResolve:    (() => void) | null = null;
   private purgeIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -141,13 +141,13 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   Event Emitter
   */
 
-  public on(event: SemaphoreEventType, listener: (...args: any[]) => void): void {
+  public on<E extends SemaphoreEventType>(event: E, listener: SemaphoreEventListener<E>): void {
     if (!this.eventListeners.has(event)) this.eventListeners.set(event, new Set());
-    this.eventListeners.get(event)!.add(listener);
+    this.eventListeners.get(event)!.add(listener as (...args: any[]) => void);
   }
 
-  public off(event: SemaphoreEventType, listener: (...args: any[]) => void): void {
-    this.eventListeners.get(event)?.delete(listener);
+  public off<E extends SemaphoreEventType>(event: E, listener: SemaphoreEventListener<E>): void {
+    this.eventListeners.get(event)?.delete(listener as (...args: any[]) => void);
     if (this.eventListeners.get(event)?.size === 0) this.eventListeners.delete(event);
   }
 
@@ -163,9 +163,20 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     return listeners !== undefined && listeners.size > 0;
   }
 
-  private emit(event: SemaphoreEventType, ...args: any[]): void {
+  private emit<E extends SemaphoreEventType>(event: E, ...args: SemaphoreEventMap[E]): void {
     const listeners = this.eventListeners.get(event);
     if (!listeners || listeners.size === 0) return;
+    // Single-listener fast path (the common case): invoke directly and skip the
+    // defensive snapshot allocation. With one listener there is no iteration to
+    // corrupt — a self-removal or added listener only affects the *next* emit.
+    if (listeners.size === 1) {
+      const listener = listeners.values().next().value!;
+      try { listener(...args); }
+      catch (err) { if (this.debug) console.warn(`[Semaphore] Error in listener for "${event}":`, err); }
+      return;
+    }
+    // Multiple listeners: snapshot so a listener removing/adding mid-emit can't
+    // mutate the Set we're iterating.
     for (const listener of Array.from(listeners)) {
       try { listener(...args); }
       catch (err) { if (this.debug) console.warn(`[Semaphore] Error in listener for "${event}":`, err); }
@@ -616,8 +627,14 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   /**
    * Rejects all queued tasks and restores the semaphore to its initial state.
    * Event listeners are preserved unless { clearListeners: true } is passed.
+   *
+   * Throws SemaphoreError('SHUTDOWN') if the semaphore has been shut down:
+   * shutdown() is terminal and cannot be reversed by reset().
    */
   public reset(options: { clearListeners?: boolean } = {}): void {
+    if (this.isShutdown) {
+      throw new SemaphoreError('Cannot reset a semaphore that has been shut down', 'SHUTDOWN');
+    }
     for (const task of this.queue.toArray()) task.discard(new SemaphoreError('Semaphore reset', 'SHUTDOWN'));
     this.queue.clear();
     this.enqueueOrder.clear();

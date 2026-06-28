@@ -6,7 +6,9 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary', 'lcov'],
-      thresholds: { lines: 90 },
+      // branches trails lines (currently ~89% overall); the floor catches a
+      // branch-coverage regression that a lines-only threshold would miss.
+      thresholds: { lines: 90, branches: 85 },
     },
   },
 });

@@ -23,6 +23,7 @@ circuit could never close. Forcing probes first here means a custom comparator
 never has to know probes exist.
 */
 
+import { SemaphoreError } from './error';
 import type { Comparator, QueueOrder, QueuedTaskView } from './types';
 
 /** Built-in orderings, keyed by `queueOrder`. */
@@ -49,21 +50,22 @@ interface OrderableTask extends QueuedTaskView {
 
 /**
  * Resolve the user-facing comparator: an explicit `comparator` wins over a
- * named `queueOrder`, which defaults to 'fifo'. Throws on an invalid value so
- * misconfiguration fails fast at construction.
+ * named `queueOrder`, which defaults to 'fifoWithPriority'. Throws on an invalid
+ * value so misconfiguration fails fast at construction.
  */
 export function resolveComparator(config: OrderingConfig): Comparator<QueuedTaskView> {
   if (config.comparator !== undefined) {
     if (typeof config.comparator !== 'function') {
-      throw new Error('Semaphore comparator must be a function');
+      throw new SemaphoreError('Semaphore comparator must be a function', 'INVALID_ARGUMENT');
     }
     return config.comparator;
   }
   const order = config.queueOrder ?? 'fifoWithPriority';
   const cmp = QUEUE_ORDERINGS[order];
   if (cmp === undefined) {
-    throw new Error(
-      `Semaphore queueOrder must be one of: ${Object.keys(QUEUE_ORDERINGS).join(', ')} (got ${JSON.stringify(order)})`
+    throw new SemaphoreError(
+      `Semaphore queueOrder must be one of: ${Object.keys(QUEUE_ORDERINGS).join(', ')} (got ${JSON.stringify(order)})`,
+      'INVALID_ARGUMENT'
     );
   }
   return cmp;

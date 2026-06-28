@@ -117,6 +117,27 @@ export const SemaphoreEvents = {
 
 export type SemaphoreEventType = typeof SemaphoreEvents[keyof typeof SemaphoreEvents];
 
+/**
+ * Maps each event to its listener argument tuple, so `on`/`off` give consumers
+ * a precisely-typed payload instead of `any`. The tuple form (`[Payload]` or
+ * `[]`) lets events carry zero or one argument while keeping the listener
+ * signature exact.
+ */
+export interface SemaphoreEventMap {
+  'task-acquire':     [payload: { queued: number; running: number; probe?: boolean }];
+  'task-release':     [payload: { queued: number; running: number }];
+  'task-timeout':     [payload: { queueLength: number; backoffDelay: number; taskId: number }];
+  'task-abort':       [];
+  'queue-purge':      [task: QueuedTaskView];
+  'circuit-open':     [payload: { timeoutRate: number; recentTimeouts: number; total: number; reason?: string }];
+  'circuit-half-open': [];
+  'circuit-close':    [];
+  'shutdown':         [reason: string];
+}
+
+/** Listener signature for a given event, derived from {@link SemaphoreEventMap}. */
+export type SemaphoreEventListener<E extends SemaphoreEventType> = (...args: SemaphoreEventMap[E]) => void;
+
 /*
 Errors
 */
@@ -124,6 +145,7 @@ Errors
 export type SemaphoreErrorCode =
   | 'CIRCUIT_OPEN'
   | 'CIRCUIT_HALF_OPEN'
+  | 'INVALID_ARGUMENT'
   | 'INVALID_WEIGHT'
   | 'INVALID_PRIORITY'
   | 'QUEUE_FULL'
