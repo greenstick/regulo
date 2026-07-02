@@ -116,6 +116,7 @@ export class QueuedTask {
     return true;
   }
 
+
   /** Reject this task's promise. The caller must have won claim() first. */
   public reject(err: Error): void { this._reject(err); }
 }

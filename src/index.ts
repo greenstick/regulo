@@ -27,4 +27,5 @@ export type {
   Comparator,
   QueueOrder,
   QueuedTaskView,
+  WindowOptions,
 } from './types';

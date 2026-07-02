@@ -19,6 +19,8 @@ export interface SemaphoreConfig {
   circuitBreakerThreshold?: number;
   /** Sliding window size in ms for circuit breaker failure rate. Min: 1000. Default: 10000 */
   circuitBreakerWindow?: number;
+  /** The time-width of the circuit window breaker. Denominator for calculating bucket count with: window / windowBucketWidth. Default: 1000 */
+  circuitBreakerWindowBucketWidth?: number;
   /** Milliseconds the circuit stays open before allowing a probe. Min: 1000. Default: 5000 */
   circuitBreakerCooldown?: number;
   /** Minimum requests in the window before the circuit can trip. Default: 10 */
@@ -31,6 +33,8 @@ export interface SemaphoreConfig {
   purgeIntervalMs?: number;
   /** Enable windowed metrics collection. Default: true */
   metricsEnabled?: boolean;
+  /** Metric windows to use for collection. Default: undefined */
+  metricsWindows?: WindowOptions[];
   /** Enable debug logging (console output and the PermitPool invariant check). Does not affect which events are emitted — all events fire regardless. Default: false */
   debug?: boolean;
   /**
@@ -80,6 +84,7 @@ export type CircuitState = 'closed' | 'open' | 'half-open';
 export interface CircuitBreakerConfig {
   readonly threshold?: number;
   readonly window?: number;
+  readonly windowBucketWidth?: number;
   readonly cooldown?: number;
   readonly minThroughput?: number;
   readonly minFailures?: number;

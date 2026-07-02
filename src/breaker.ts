@@ -77,7 +77,7 @@ class CircuitBreakerEventWindow {
 
 export class CircuitBreaker {
 
-  private state: CircuitState = 'closed';
+  public state: CircuitState = 'closed';
   private openUntil = 0;
   private probeInFlight = false;
   private _probeTaskId: number | null = null;
@@ -85,6 +85,7 @@ export class CircuitBreaker {
   private readonly eventWindow: CircuitBreakerEventWindow;
   private readonly threshold: number;
   private readonly window: number;
+  private readonly windowBucketWidth: number;
   private readonly cooldown: number;
   private readonly minThroughput: number;
   private readonly minFailures: number;
@@ -95,6 +96,8 @@ export class CircuitBreaker {
     this.threshold = validateNumber(config.threshold ?? 0.5, "CircuitBreaker threshold", 0, 1, false, false);
     // >= 1000
     this.window = validateNumber(config.window ?? 10000, "CircuitBreaker window", 1000, Number.MAX_SAFE_INTEGER, true, true);
+    // > 0
+    this.windowBucketWidth = validateNumber(config.windowBucketWidth ?? 1000, "CircuitBreaker windowBucketWidth", 1, Number.MAX_SAFE_INTEGER, true, true);
     // >= 1000
     this.cooldown = validateNumber(config.cooldown ?? 5000, "CircuitBreaker cooldown", 1000, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
@@ -102,10 +105,13 @@ export class CircuitBreaker {
     // > 0
     this.minFailures = validateNumber(config.minFailures ?? 5, "CircuitBreaker minFailures", 1, Number.MAX_SAFE_INTEGER, true, true);
 
-    // One 1-second bucket per second of the window; total coverage >= window ms.
-    this.eventWindow = new CircuitBreakerEventWindow(Math.ceil(this.window / 1000), 1000);
+    // Default of one 1-second bucket per second of the window; total coverage >= window ms.
+    this.eventWindow = new CircuitBreakerEventWindow(Math.ceil(this.window / this.windowBucketWidth), this.windowBucketWidth);
 
     // Integrated Cross-Checks
+    if (this.window < this.windowBucketWidth) {
+      throw new SemaphoreError("CircuitBreaker window must be >= windowBucketWidth", 'INVALID_ARGUMENT');
+    }
     if (this.minThroughput < this.minFailures) {
       throw new SemaphoreError("CircuitBreaker minThroughput must be >= minFailures", 'INVALID_ARGUMENT');
     }

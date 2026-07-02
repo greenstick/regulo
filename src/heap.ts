@@ -12,6 +12,7 @@ plain property write — the same trick IntrusiveList uses for the enqueue index
 Removal therefore takes the element itself rather than an id.
 */
 
+import { SemaphoreError } from './error';
 import type { Comparator } from './types';
 
 export interface HeapNode {
@@ -46,7 +47,7 @@ export class IndexedBinaryHeap<T extends HeapNode> {
   }
 
   public insert(item: T): void {
-    if (item.heapIndex >= 0) throw new Error('Item is already in a heap');
+    if (item.heapIndex >= 0) throw new SemaphoreError('Item is already in a heap', 'INVALID_ARGUMENT');
     const index = this.heap.length;
     this.heap.push(item);
     item.heapIndex = index;

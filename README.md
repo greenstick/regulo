@@ -210,7 +210,7 @@ Non-blocking. Returns a release closure, or `null` if insufficient permits are a
 
 #### `drain(timeoutMs?): Promise<void>`
 
-Resolves when the queue is empty and all permits are returned. Multiple callers share the same promise. Pass `timeoutMs` (a positive integer) to set a deadline — rejects with `TIMEOUT` if not idle in time; an invalid value throws `SemaphoreError` (`INVALID_ARGUMENT`) synchronously. Calling `drain()` after `shutdown()` rejects with `SHUTDOWN`.
+Resolves when the queue is empty and all permits are returned. Multiple callers share the same promise — if a `drain()` is already in flight, later calls return that same promise as-is, so only the *first* caller's `timeoutMs` (if any) governs; a later caller's own `timeoutMs` argument is not applied. Pass `timeoutMs` (a positive integer) to set a deadline — rejects with `TIMEOUT` if not idle in time; an invalid value throws `SemaphoreError` (`INVALID_ARGUMENT`) synchronously, even if it turns out an in-flight drain's promise is what gets returned. Calling `drain()` after `shutdown()` rejects with `SHUTDOWN`.
 
 > Without `timeoutMs`, `drain()` can block indefinitely if a caller holds a permit and never releases it.
 
@@ -236,6 +236,10 @@ Returns a snapshot of current operating state. See [Metrics](#metrics) for the f
 
 > `status()` is O(1) in queue depth — safe to call on a metrics scrape path. (Queue age is read from an enqueue-ordered index, not by scanning the queue.)
 
+#### `peekQueue(): QueuedTaskView[]`
+
+Read-only snapshot of the queue, in enqueue order.
+
 #### `isAvailable(): boolean`
 
 Returns `true` if the semaphore is not shut down, the circuit is not open, and a permit is available.
@@ -248,6 +252,14 @@ Current number of tasks waiting for a permit.
 
 Number of permits not currently held.
 
+#### `capacity: number`
+
+Total permits the semaphore was constructed with.
+
+#### `circuitState: 'closed' | 'open' | 'half-open'`
+
+Current circuit breaker state.
+
 ## Configuration Reference
 
 | Option | Type | Default | Description |
@@ -258,6 +270,7 @@ Number of permits not currently held.
 | `rejectOnFull` | `boolean` | `false` | Reject immediately when all permits are held (no queuing) |
 | `circuitBreakerThreshold` | `number` | `0.5` | Failure rate in `(0,1)` that trips the circuit |
 | `circuitBreakerWindow` | `number` | `10000` | Sliding window size in ms for the failure rate. Min: `1000` |
+| `circuitBreakerWindowBucketWidth` | `number` | `1000` | Width (ms) of each bucket in the circuit breaker's sliding window; bucket count = `window / windowBucketWidth`. Min: `1` |
 | `circuitBreakerCooldown` | `number` | `5000` | ms the circuit stays open before allowing a probe. Min: `1000` |
 | `circuitBreakerMinThroughput` | `number` | `10` | Min requests in window before circuit can trip |
 | `circuitBreakerMinFailures` | `number` | `5` | Min failures in window before circuit can trip |
@@ -266,6 +279,7 @@ Number of permits not currently held.
 | `backoffDecayFactor` | `number` | `0.5` | Backoff decay factor per idle second, in `(0,1)` |
 | `purgeIntervalMs` | `number` | `3000` | ms between stale-task purge sweeps. Min: `500` |
 | `metricsEnabled` | `boolean` | `true` | Enable windowed metrics collection |
+| `metricsWindows` | `WindowOptions[]` | `undefined` (falls back to the built-in 1m/5m/15m/1h/24h set) | Overrides the windows behind `status().metrics`. Each entry is `{ size, stepMs }`; window length = `size × stepMs` |
 | `queueOrder` | `'fifo' \| 'lifo' \| 'fifoWithPriority' \| 'lifoWithPriority'` | `'fifoWithPriority'` | Queue dispatch order. `fifo`/`lifo` order purely by enqueue time; the `*WithPriority` variants make priority primary and break ties by enqueue time. See [Choosing an ordering](#choosing-an-ordering-and-its-implications). Ignored if `comparator` is set |
 | `comparator` | `(a, b) => number` | — | Custom ordering over queued tasks (lower sorts/dispatches first); overrides `queueOrder` |
 | `debug` | `boolean` | `false` | Enable debug logging and the permit-pool invariant check. Does not gate events — all events fire regardless |
@@ -284,6 +298,7 @@ const config: SemaphoreConfig = {
   // Circuit breaker
   circuitBreakerThreshold: 0.5,            // timeout rate in (0,1) that trips the circuit
   circuitBreakerWindow: 10000,             // ms sliding window for the rate; min 1000
+  circuitBreakerWindowBucketWidth: 1000,   // ms per bucket; window / windowBucketWidth = bucket count
   circuitBreakerCooldown: 5000,            // ms open before a probe is allowed; min 1000
   circuitBreakerMinThroughput: 10,         // min requests in window before it can trip; min 1
   circuitBreakerMinFailures: 5,            // min failures in window before it can trip; min 1
@@ -294,6 +309,7 @@ const config: SemaphoreConfig = {
   // Maintenance & observability
   purgeIntervalMs: 3000,                   // ms between stale-task purge sweeps; min 500
   metricsEnabled: true,                    // windowed metrics collection
+  // metricsWindows: undefined,            // override the default 1m/5m/15m/1h/24h windows
   debug: false,                            // debug logging + permit-pool invariant check
   // Ordering
   queueOrder: 'fifoWithPriority',          // 'fifo' | 'lifo' | 'fifoWithPriority' | 'lifoWithPriority'

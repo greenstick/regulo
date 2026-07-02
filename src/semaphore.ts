@@ -37,7 +37,7 @@ import { SemaphoreMetrics } from './metrics';
 import { buildComparator } from './ordering';
 import { SemaphoreEvents } from './types';
 
-import type { SemaphoreConfig, SemaphoreEventType, SemaphoreEventMap, SemaphoreEventListener, SemaphoreMetricsSnapshot } from './types';
+import type { SemaphoreConfig, SemaphoreEventType, SemaphoreEventMap, SemaphoreEventListener, SemaphoreMetricsSnapshot, CircuitState } from './types';
 
 export class Semaphore {
 
@@ -46,12 +46,12 @@ export class Semaphore {
   // drives dispatch order; `enqueueOrder` (insertion-ordered linked list) gives
   // O(1) queue-age reads and an O(s) stale purge. Both are kept in lockstep —
   // every queued task is present in both, or neither (see _enqueue/_dequeue).
+  private metricsCollector?: SemaphoreMetrics;
   private queue: IndexedBinaryHeap<QueuedTask>;
   private readonly enqueueOrder: IntrusiveList<QueuedTask>;
   private readonly permits:  PermitPool;
   private readonly circuit:  CircuitBreaker;
   private readonly backoff:  BackoffTracker;
-  private readonly metricsCollector?: SemaphoreMetrics;
 
   // Config
   private readonly queueMaxLength:  number;
@@ -116,20 +116,21 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.permits      = new PermitPool(count);
     // Validation performed in CircuitBreaker
     this.circuit  = new CircuitBreaker({
-      threshold:     config.circuitBreakerThreshold,
-      window:        config.circuitBreakerWindow,
-      cooldown:      config.circuitBreakerCooldown,
-      minThroughput: config.circuitBreakerMinThroughput,
-      minFailures:   config.circuitBreakerMinFailures,
+      threshold:          config.circuitBreakerThreshold,
+      window:             config.circuitBreakerWindow,
+      windowBucketWidth:  config.circuitBreakerWindowBucketWidth,
+      cooldown:           config.circuitBreakerCooldown,
+      minThroughput:      config.circuitBreakerMinThroughput,
+      minFailures:        config.circuitBreakerMinFailures,
     });
     // Validation performed in BackoffTracker
     this.backoff  = new BackoffTracker({
-      initialTimeout: config.backoffInitialTimeout,
-      maxTimeout:     config.backoffMaxTimeout,
-      decayFactor:    config.backoffDecayFactor,
+      initialTimeout:     config.backoffInitialTimeout,
+      maxTimeout:         config.backoffMaxTimeout,
+      decayFactor:        config.backoffDecayFactor,
     });
 
-    this.metricsCollector = this.metricsEnabled ? new SemaphoreMetrics() : undefined;
+    this.metricsCollector = this.metricsEnabled ? new SemaphoreMetrics(config.metricsWindows) : void 0;
     this.metricsCollector?.markCapacityChange(this.permits.capacity);
     this.metricsCollector?.sampleGauges(Date.now(), this.permits.inFlight, this.queue.size);
 
@@ -172,14 +173,14 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     if (listeners.size === 1) {
       const listener = listeners.values().next().value!;
       try { listener(...args); }
-      catch (err) { if (this.debug) console.warn(`[Semaphore] Error in listener for "${event}":`, err); }
+      catch (err) { console.warn(`[Semaphore] Error in listener for "${event}":`, err); }
       return;
     }
     // Multiple listeners: snapshot so a listener removing/adding mid-emit can't
     // mutate the Set we're iterating.
     for (const listener of Array.from(listeners)) {
       try { listener(...args); }
-      catch (err) { if (this.debug) console.warn(`[Semaphore] Error in listener for "${event}":`, err); }
+      catch (err) { console.warn(`[Semaphore] Error in listener for "${event}":`, err); }
     }
   }
 
@@ -328,6 +329,21 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   Task Terminal Handlers
   */
 
+  // When the circuit trips open, queued callers would otherwise sit until
+  // their individual queueMaxTimeout elapses and surface a misleading
+  // TIMEOUT error. Evict them immediately with CIRCUIT_OPEN instead. The
+  // task that triggered the trip is excluded — it's rejected separately
+  // by the caller of this method.
+  private _evictQueueOnCircuitOpen(triggeringTask: QueuedTask) {
+    if (this.queue.size === 0) return;
+    for (const task of this.queue.toArray()) {
+      if (task === triggeringTask || task.isProbe) continue;
+      const discarded = task.discard(new SemaphoreError("Circuit breaker opened while task was queued", "CIRCUIT_OPEN"));
+      this._dequeue(task);
+      if (discarded && this.debug) console.warn(`[Semaphore] Evicted queued task #${task.id}: circuit opened`);
+    }
+  }
+
   // Timeout side effects + reject for a single expired task. The caller
   // (_fireTimeout) has already claimed and dequeued it, so this only records the
   // saturation signal (circuit + backoff), emits, and rejects — it does not
@@ -348,6 +364,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         this.emit(SemaphoreEvents.CIRCUITOPEN, { timeoutRate: result.timeoutRate, recentTimeouts: result.failures, total: result.attempts });
         this.metricsCollector?.markCircuitOpen();
         if (this.debug) console.warn(`[Semaphore] Circuit opened. Rate: ${(result.timeoutRate * 100).toFixed(1)}%`);
+        this._evictQueueOnCircuitOpen(task);
       }
     }
 
@@ -478,7 +495,10 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       if (discarded) {
         this.totalTimeouts++;
         this.metricsCollector?.onTimeout(Date.now(), this.queue.size);
-        this.emit(SemaphoreEvents.QUEUEPURGE, head);
+        // Emit the narrow QueuedTaskView shape the type declares, not the raw
+        // internal QueuedTask (which carries heap/list links and one-shot
+        // finalization methods that a listener has no business touching).
+        this.emit(SemaphoreEvents.QUEUEPURGE, { id: head.id, priority: head.priority, enqueueTime: head.enqueueTime, weight: head.weight });
         if (this.debug) console.warn(`[Semaphore] Purged stale task #${head.id}`);
       }
       head = this.enqueueOrder.peekHead();
@@ -509,7 +529,6 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       this.schedule();
     }
     if (this.circuit.isOpen) return null;
-    this.circuit.trackAttempt();
     return this._tryAcquireFast(weight);
   }
 
@@ -579,6 +598,19 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       this._enqueue(task);
       this.schedule();
     });
+  }
+
+  /**
+   * Read-only snapshot of queue, in enqueue order.
+   */
+  public peekQueue() {
+    const out = [];
+    let node = this.enqueueOrder.peekHead();
+    while (node !== void 0) {
+     out.push({ id: node.id, priority: node.priority, enqueueTime: node.enqueueTime, weight: node.weight, isProbe: node.isProbe });
+     node = node.next ?? void 0;
+    }
+    return out;
   }
 
   /**
@@ -678,6 +710,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.queue.clear();
     this.enqueueOrder.clear();
     this.metricsCollector?.destroy();
+    this.metricsCollector = void 0;
     if (this.drainResolve) { this.drainResolve(); this.drainResolve = null; this.drainPromise = null; }
     this.emit(SemaphoreEvents.SHUTDOWN, reason);
   }
@@ -745,11 +778,13 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     };
   }
 
+  public get availablePermits(): number { return this.permits.available; }
   /** True if the semaphore is not shut down, circuit is not open, and a permit is available. */
   public isAvailable(): boolean {
     return !this.isShutdown && !this.circuit.isOpen && !this.permits.isFull;
   }
-
+  public get capacity(): number { return this.permits.capacity; }
+  public get circuitState(): CircuitState {  return this.circuit.state; }
   public get queueLength(): number    { return this.queue.size; }
-  public get availablePermits(): number { return this.permits.available; }
+
 }

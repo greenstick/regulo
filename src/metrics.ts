@@ -21,6 +21,9 @@ Performance
   retained for fine-grained unit testing and compute their own `now`.
 */
 
+import { SemaphoreError } from './error';
+import { validateNumber } from './validation';
+
 import type {
   WindowOptions,
   SemaphoreMetricsSnapshot,
@@ -57,9 +60,8 @@ class CombinedWindow {
   private readonly latCount: Int32Array;
 
   constructor(size: number, stepMs: number) {
-    if (size <= 0) throw new Error('CombinedWindow size must be > 0');
-    this.size = size;
-    this.stepMs = stepMs;
+    this.size = validateNumber(size, 'CombinedWindow size', 1, Number.MAX_SAFE_INTEGER, true, true);
+    this.stepMs = validateNumber(stepMs, 'CombinedWindow stepMs', 1, Number.MAX_SAFE_INTEGER, true, true);
     this.timestamps = new Float64Array(size);
     this.acquired = new Int32Array(size);
     this.released = new Int32Array(size);
@@ -202,7 +204,7 @@ export class SemaphoreMetrics {
   private _circuitHalfOpen      = false;
 
   constructor(options: WindowOptions[] = DEFAULT_WINDOW_OPTIONS) {
-    if (options.length === 0) throw new Error('SemaphoreMetrics requires at least one WindowOptions');
+    if (options.length === 0) throw new SemaphoreError("SemaphoreMetrics requires at least one WindowOptions", "INVALID_ARGUMENT");
     this.windows = options.map(({ size, stepMs }) => new CombinedWindow(size, stepMs));
     this.windowLabels = options.map(({ size, stepMs }) => {
       const ms = size * stepMs;
