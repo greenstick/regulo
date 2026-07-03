@@ -31,6 +31,7 @@ describe('Semaphore', () => {
       ['purgeIntervalMs < 500', () => new Semaphore(1, { purgeIntervalMs: 100 })],
       ['backoffMaxTimeout < backoffInitialTimeout', () => new Semaphore(1, { backoffInitialTimeout: 100, backoffMaxTimeout: 50 })],
       ['circuitBreakerMinFailures > circuitBreakerMinThroughput', () => new Semaphore(1, { circuitBreakerMinThroughput: 5, circuitBreakerMinFailures: 10 })],
+      ['circuitBreakerWindow spans < 2 windowBucketWidth buckets', () => new Semaphore(1, { circuitBreakerWindow: 1000, circuitBreakerWindowBucketWidth: 1000 })],
     ])('throws on invalid config: %s', (_, fn) => {
       expect(fn).toThrow();
     });
@@ -1115,7 +1116,14 @@ describe('Semaphore', () => {
         purgeIntervalMs: 100000,
         queueMaxTimeout: 50,
         queueMaxAge: 100000,
+        // A single-bucket window (window === windowBucketWidth's default of
+        // 1000) would reuse the same bucket every wall-clock second; a write
+        // landing just after a rollover zeroes it and can silently drop an
+        // earlier count, flaking this test's tight timing. Use a narrow
+        // bucket width so the window spans many buckets and no in-window
+        // data is ever clobbered by a same-window write.
         circuitBreakerWindow: 1000,
+        circuitBreakerWindowBucketWidth: 50,
         circuitBreakerCooldown: 60000,
         circuitBreakerMinThroughput: 1,
         circuitBreakerMinFailures: 1,

@@ -101,6 +101,7 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
   private readonly threshold: number;
   private readonly window: number;
   private readonly windowBucketWidth: number;
+  private readonly windowBucketCount: number;
   private readonly cooldown: number;
   private readonly minThroughput: number;
   private readonly minFailures: number;
@@ -113,15 +114,14 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
     this.window = validateNumber(config.window ?? 10000, "SaturationCircuitBreaker window", 1000, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
     this.windowBucketWidth = validateNumber(config.windowBucketWidth ?? 1000, "SaturationCircuitBreaker windowBucketWidth", 1, Number.MAX_SAFE_INTEGER, true, true);
+    // > 1
+    this.windowBucketCount = Math.ceil(this.window / this.windowBucketWidth); // See integrated cross-check below for validation
     // >= 1000
     this.cooldown = validateNumber(config.cooldown ?? 5000, "SaturationCircuitBreaker cooldown", 1000, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
     this.minThroughput = validateNumber(config.minThroughput ?? 10, "SaturationCircuitBreaker minThroughput", 1, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
     this.minFailures = validateNumber(config.minFailures ?? 5, "SaturationCircuitBreaker minFailures", 1, Number.MAX_SAFE_INTEGER, true, true);
-
-    // Default of one 1-second bucket per second of the window; total coverage >= window ms.
-    this.eventWindow = new CircuitBreakerEventWindow(Math.ceil(this.window / this.windowBucketWidth), this.windowBucketWidth);
 
     // Integrated Cross-Checks
     if (this.window < this.windowBucketWidth) {
@@ -130,6 +130,18 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
     if (this.minThroughput < this.minFailures) {
       throw new SemaphoreError("SaturationCircuitBreaker minThroughput must be >= minFailures", 'INVALID_ARGUMENT');
     }
+    // A single-bucket window (window === windowBucketWidth) reuses the same
+    // bucket every step: a write that lands just after a wall-clock bucket
+    // rollover zeroes it before recording, silently discarding counts from
+    // earlier in the same logical window. Two or more buckets guarantee the
+    // oldest bucket is only ever reused once it has actually aged out of the
+    // window, so in-window data is never clobbered by a same-window write.
+    if (this.windowBucketCount < 2) {
+      throw new SemaphoreError("SaturationCircuitBreaker window must span at least 2 windowBucketWidth buckets", 'INVALID_ARGUMENT');
+    }
+
+    // Default of one 1-second bucket per second of the window; total coverage >= window ms.
+    this.eventWindow = new CircuitBreakerEventWindow(this.windowBucketCount, this.windowBucketWidth);
   }
 
   // Getters
