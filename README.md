@@ -23,7 +23,7 @@ Like the dial on a gas range, **Regulo** sits between incoming work and the burn
 - **🌡️ Adaptive backoff** — during a timeout burst, dispatch eases down to a simmer and returns to a full boil on its own once things recover.
 - **📈 Built-in observability** — windowed 1m/5m/15m/1h/24h rollups (throughput, latency, queue depth, in-flight), lifetime counters, and an event stream, all through one `status()` call.
 - **⏳ Head-of-line fairness** — once a caller is in line, nobody jumps the queue ahead of it.
-- **🪶 Tiny footprint, no supply-chain surface** — roughly 6.6 KB min+gzip (~26 KB minified, ~6.1 KB brotli) with zero runtime dependencies, so there's nothing transitive to audit, update, or trust. Tree-shakeable ESM.
+- **🪶 Small footprint, no supply-chain surface** — a single ~33 KB file with zero runtime dependencies, so there's nothing transitive to audit, update, or trust. Tree-shakeable ESM.
 - **🧯 Production-minded** — graceful `drain()`, `reset()`, `cancel()`, and `shutdown()`; stale-task purging; double-release safety; strict-mode TypeScript types.
 
 ## Install
