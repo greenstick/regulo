@@ -43,6 +43,14 @@ class CombinedWindow {
   private readonly stepMs: number;
   private readonly timestamps: Float64Array;
 
+  // Current-bucket cache: [cachedUntil - stepMs, cachedUntil) maps to
+  // cachedIndex. Hot-path bucket resolution is then two comparisons instead of
+  // a float division + modulo + timestamp check per event; the full
+  // computation runs only on rollover into a new step (or a backwards clock
+  // jump, which falls through to the exact path).
+  private cachedIndex = -1;
+  private cachedUntil = 0;
+
   // counts
   private readonly acquired: Int32Array;
   private readonly released: Int32Array;
@@ -78,6 +86,7 @@ class CombinedWindow {
 
   /** Resolve the bucket for `now`, clearing it on rollover into a new step. */
   private bucket(now: number): number {
+    if (now < this.cachedUntil && now >= this.cachedUntil - this.stepMs) return this.cachedIndex;
     const epoch = Math.floor(now / this.stepMs);
     const ts = epoch * this.stepMs;
     const i = epoch % this.size;
@@ -88,6 +97,8 @@ class CombinedWindow {
       this.qSum[i] = 0; this.qCount[i] = 0; this.qMax[i] = 0;
       this.latSum[i] = 0; this.latCount[i] = 0;
     }
+    this.cachedIndex = i;
+    this.cachedUntil = ts + this.stepMs;
     return i;
   }
 
@@ -166,6 +177,8 @@ class CombinedWindow {
   }
 
   public reset(): void {
+    this.cachedIndex = -1;
+    this.cachedUntil = 0;
     this.timestamps.fill(0);
     this.acquired.fill(0); this.released.fill(0); this.timeouts.fill(0);
     this.ifSum.fill(0); this.ifCount.fill(0); this.ifMax.fill(0);
@@ -194,6 +207,12 @@ export class SemaphoreMetrics {
   private readonly windows: CombinedWindow[];
   private readonly windowLabels: string[];
 
+  // The shortest configured horizon — the basis for the point-in-time rate
+  // fields in Semaphore.status() (requestsPerSecond, timeoutRate). With the
+  // default windows this is the 1m window.
+  public readonly primaryLabel: string;
+  public readonly primaryWindowMs: number;
+
   private _totalAcquiredFast    = 0;
   private _totalAcquiredQueued  = 0;
   private _totalReleased        = 0;
@@ -213,6 +232,23 @@ export class SemaphoreMetrics {
       if (ms >= 1000    && ms % 1000    === 0) return `${ms / 1000}s`;
       return `${ms}ms`;
     });
+
+    // Labels key the snapshot record — two windows with the same horizon would
+    // silently overwrite each other there, so reject the config outright.
+    const seen = new Set<string>();
+    for (const label of this.windowLabels) {
+      if (seen.has(label)) {
+        throw new SemaphoreError(`SemaphoreMetrics windows produce duplicate label "${label}" (two windows cover the same horizon)`, 'INVALID_ARGUMENT');
+      }
+      seen.add(label);
+    }
+
+    let primary = 0;
+    for (let i = 1; i < options.length; i++) {
+      if (options[i]!.size * options[i]!.stepMs < options[primary]!.size * options[primary]!.stepMs) primary = i;
+    }
+    this.primaryLabel = this.windowLabels[primary]!;
+    this.primaryWindowMs = options[primary]!.size * options[primary]!.stepMs;
   }
 
   /*

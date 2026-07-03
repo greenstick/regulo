@@ -15,20 +15,21 @@ Core invariant: permits.inFlight + permits.available === permits.capacity.
 Verified by PermitPool.assertInvariant() in debug mode after every mutation.
 
 Circuit breaker   closed → open → half-open → closed
-  All state and transitions live in CircuitBreaker. The semaphore calls
-  checkAndTransition() at the top of every acquire() and emits the appropriate
-  event when a transition is reported.
+  All state and transitions live behind the CircuitBreakerStrategy contract
+  (default: SaturationCircuitBreaker; injectable via config.circuitBreaker).
+  The semaphore calls checkAndTransition() at the top of every acquire() and
+  emits the appropriate event when a transition is reported.
 
 Metrics
   Two independent systems:
-  CircuitBreaker  — owns a single sliding window for trip decisions only.
+  The breaker      — owns its own failure accounting for trip decisions only.
   SemaphoreMetrics — MultiWindow exposing 1m/5m/15m/1h/24h rollups for dashboards.
 */
 
 import { validateNumber } from "./validation";
 import { SemaphoreError } from './error';
 import { PermitPool } from './permit';
-import { CircuitBreaker } from './breaker';
+import { SaturationCircuitBreaker } from './breakers/saturation';
 import { BackoffTracker } from './backoff';
 import { QueuedTask } from './queue';
 import { IndexedBinaryHeap } from "./heap";
@@ -37,7 +38,7 @@ import { SemaphoreMetrics } from './metrics';
 import { buildComparator } from './ordering';
 import { SemaphoreEvents } from './types';
 
-import type { SemaphoreConfig, SemaphoreEventType, SemaphoreEventMap, SemaphoreEventListener, SemaphoreMetricsSnapshot, CircuitState } from './types';
+import type { SemaphoreConfig, SemaphoreEventType, SemaphoreEventMap, SemaphoreEventListener, SemaphoreMetricsSnapshot, CircuitState, CircuitBreakerStrategy, QueuedTaskView } from './types';
 
 export class Semaphore {
 
@@ -50,7 +51,7 @@ export class Semaphore {
   private queue: IndexedBinaryHeap<QueuedTask>;
   private readonly enqueueOrder: IntrusiveList<QueuedTask>;
   private readonly permits:  PermitPool;
-  private readonly circuit:  CircuitBreaker;
+  private readonly circuit:  CircuitBreakerStrategy;
   private readonly backoff:  BackoffTracker;
 
   // Config
@@ -61,6 +62,7 @@ export class Semaphore {
   private readonly purgeIntervalMs: number;
   private readonly metricsEnabled:  boolean;
   private readonly debug:           boolean;
+  private readonly failurePredicate?: (error: unknown) => boolean;
 
   // State
   // Outstanding (un-called) release closures. Each closure carries its own
@@ -75,6 +77,7 @@ export class Semaphore {
   private totalAcquired    = 0;
   private totalReleased    = 0;
   private totalTimeouts    = 0;
+  private totalEvictions   = 0;
   private eventListeners   = new Map<SemaphoreEventType, Set<(...args: any[]) => void>>();
   private drainPromise:    Promise<void> | null = null;
   private drainResolve:    (() => void) | null = null;
@@ -104,6 +107,11 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.metricsEnabled  = config.metricsEnabled  ?? true;
     this.debug           = config.debug           ?? false;
 
+    if (config.circuitBreakerFailurePredicate !== undefined && typeof config.circuitBreakerFailurePredicate !== 'function') {
+      throw new SemaphoreError('Semaphore circuitBreakerFailurePredicate must be a function', 'INVALID_ARGUMENT');
+    }
+    this.failurePredicate = config.circuitBreakerFailurePredicate;
+
     // Initialize Sub-systems
     // Ascending priority; ties broken per the configured ordering
     // ('fifoWithPriority' by default) or a custom comparator. Probe tasks are forced to the head by the
@@ -114,8 +122,10 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.queue        = new IndexedBinaryHeap<QueuedTask>(comparator);
     this.enqueueOrder = new IntrusiveList<QueuedTask>();
     this.permits      = new PermitPool(count);
-    // Validation performed in CircuitBreaker
-    this.circuit  = new CircuitBreaker({
+    // An injected breaker instance wins over the numeric circuitBreaker*
+    // options (the same precedence comparator has over queueOrder); the
+    // default is the saturation breaker, which validates its own config.
+    this.circuit  = config.circuitBreaker ?? new SaturationCircuitBreaker({
       threshold:          config.circuitBreakerThreshold,
       window:             config.circuitBreakerWindow,
       windowBucketWidth:  config.circuitBreakerWindowBucketWidth,
@@ -249,8 +259,23 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       if (this.hasListeners(SemaphoreEvents.TASKRELEASE)) {
         this.emit(SemaphoreEvents.TASKRELEASE, { queued: this.queue.size, running: this.permits.capacity - this.permits.available });
       }
+      this._checkDrain();
       this.schedule();
     };
+  }
+
+  // Resolve a pending drain() the moment the semaphore goes idle. Called
+  // synchronously at every transition that can reach idle (release, timeout,
+  // abort, purge, cancel) in addition to the scheduler pass, so drain
+  // resolution never depends on a scheduler tick — backoff defers those on an
+  // unref'd timer, which both delays the check and, if nothing else holds the
+  // event loop open, lets the process exit before it runs.
+  private _checkDrain(): void {
+    if (this.drainResolve && this.queue.size === 0 && this.permits.available === this.permits.capacity) {
+      this.drainResolve();
+      this.drainResolve = null;
+      this.drainPromise = null;
+    }
   }
 
   /*
@@ -322,7 +347,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       const delay = Math.max(0, head.enqueueTime + this.queueMaxTimeout - now);
       this.timeoutTimerId = setTimeout(() => this._fireTimeout(), delay);
     }
-    if (fired > 0) this.schedule();
+    if (fired > 0) { this._checkDrain(); this.schedule(); }
   }
 
   /*
@@ -331,17 +356,25 @@ constructor(count: number, config: SemaphoreConfig = {}) {
 
   // When the circuit trips open, queued callers would otherwise sit until
   // their individual queueMaxTimeout elapses and surface a misleading
-  // TIMEOUT error. Evict them immediately with CIRCUIT_OPEN instead. The
-  // task that triggered the trip is excluded — it's rejected separately
-  // by the caller of this method.
-  private _evictQueueOnCircuitOpen(triggeringTask: QueuedTask) {
+  // TIMEOUT error. Evict them immediately with CIRCUIT_OPEN instead. On a
+  // timeout-driven trip the task that triggered it is excluded — it's
+  // rejected separately by the caller; a reportFailure()-driven trip has no
+  // triggering task.
+  private _evictQueueOnCircuitOpen(triggeringTask?: QueuedTask) {
     if (this.queue.size === 0) return;
+    let evicted = 0;
     for (const task of this.queue.toArray()) {
       if (task === triggeringTask || task.isProbe) continue;
       const discarded = task.discard(new SemaphoreError("Circuit breaker opened while task was queued", "CIRCUIT_OPEN"));
       this._dequeue(task);
-      if (discarded && this.debug) console.warn(`[Semaphore] Evicted queued task #${task.id}: circuit opened`);
+      if (discarded) {
+        evicted++;
+        this.totalEvictions++;
+        this.emit(SemaphoreEvents.QUEUEEVICT, { id: task.id, priority: task.priority, enqueueTime: task.enqueueTime, weight: task.weight });
+        if (this.debug) console.warn(`[Semaphore] Evicted queued task #${task.id}: circuit opened`);
+      }
     }
+    if (evicted > 0) this.metricsCollector?.sampleQueueDepthAt(Date.now(), this.queue.size);
   }
 
   // Timeout side effects + reject for a single expired task. The caller
@@ -350,7 +383,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   // touch the queue or re-schedule (the fire loop does that once at the end).
   private _timeoutTask(task: QueuedTask): void {
     this.totalTimeouts++;
-    this.circuit.recordTimeout();
+    this.circuit.recordFailure();
     this.backoff.onTimeout();
 
     if (task.isProbe) {
@@ -381,6 +414,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.emit(SemaphoreEvents.TASKABORT);
     if (this.debug) console.info(`[Semaphore] Task #${task.id} aborted`);
     reject(new SemaphoreError('Semaphore acquire aborted', 'ABORTED'));
+    this._checkDrain();
     this.schedule();
   }
 
@@ -395,15 +429,19 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   // timer is unref'd: while tasks are queued the shared (ref'd) timeout watchdog
   // keeps the process alive, so an unref'd scheduler tick never holds it open on
   // its own.
+  // Bound once so the hot contended path doesn't allocate a fresh closure per
+  // scheduler wakeup.
+  private readonly _runSchedulerBound = () => { this._runScheduler(); };
+
   private schedule(): void {
     if (this.scheduled || this.isShutdown) return;
     this.scheduled = true;
     const delay = this.backoff.currentDelay;
     if (delay > 0) {
-      const t = setTimeout(() => { this._runScheduler(); }, delay);
+      const t = setTimeout(this._runSchedulerBound, delay);
       (t as any).unref?.();
     } else {
-      queueMicrotask(() => { this._runScheduler(); });
+      queueMicrotask(this._runSchedulerBound);
     }
   }
 
@@ -452,11 +490,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         }
       }
 
-      if (this.queue.size === 0 && this.permits.available === this.permits.capacity && this.drainResolve) {
-        this.drainResolve();
-        this.drainResolve = null;
-        this.drainPromise = null;
-      }
+      this._checkDrain();
     } catch (err: unknown) {
       if (err instanceof Error) { console.error('[Semaphore] Scheduler error:', err.message, err.stack); }
       else { console.error('[Semaphore] Scheduler error:', err); }
@@ -508,7 +542,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       console.info(`[Semaphore] Purged ${before - this.queue.size} stale tasks`);
     }
 
-    if (this.queue.size < before) this.schedule();
+    if (this.queue.size < before) { this._checkDrain(); this.schedule(); }
   }
 
   /*
@@ -601,10 +635,11 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   }
 
   /**
-   * Read-only snapshot of queue, in enqueue order.
+   * Read-only snapshot of the queue, in enqueue order. Entries additionally
+   * expose `isProbe` so a circuit-breaker probe is identifiable in the view.
    */
-  public peekQueue() {
-    const out = [];
+  public peekQueue(): (QueuedTaskView & { isProbe: boolean })[] {
+    const out: (QueuedTaskView & { isProbe: boolean })[] = [];
     let node = this.enqueueOrder.peekHead();
     while (node !== void 0) {
      out.push({ id: node.id, priority: node.priority, enqueueTime: node.enqueueTime, weight: node.weight, isProbe: node.isProbe });
@@ -616,12 +651,47 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   /**
    * Preferred entry point. Acquires a permit, runs fn(), then releases.
    * The permit is always released even if fn() throws.
+   *
+   * With `circuitBreakerFailurePredicate` configured, rejections from fn()
+   * that match the predicate feed the circuit breaker: one failure per match
+   * (as via reportFailure()), and a matching failure on a half-open probe
+   * re-opens the circuit instead of closing it on release.
    * @param weight Permits to consume (integer in 1..count). Defaults to 1.
    */
   public async use<T>(fn: () => Promise<T>, abortSignal?: AbortSignal, priority = 0, weight = 1): Promise<T> {
     const release = await this.acquire(abortSignal, priority, weight);
-    try { return await fn(); }
-    finally { release(); }
+    // In half-open exactly one acquisition — the probe — can be granted, and
+    // the circuit cannot leave half-open while that probe's permit is held, so
+    // observing half-open here identifies this acquisition as the probe. Only
+    // needed when failures are fault-scored below.
+    const isProbeAcquisition = this.failurePredicate !== undefined && this.circuit.isHalfOpen;
+    try {
+      const result = await fn();
+      release();
+      return result;
+    } catch (error) {
+      if (this.failurePredicate !== undefined) {
+        let matched = false;
+        try { matched = this.failurePredicate(error) === true; }
+        catch (predicateError) { console.warn('[Semaphore] circuitBreakerFailurePredicate threw (rejection treated as non-matching):', predicateError); }
+        if (matched) {
+          if (isProbeAcquisition && this.circuit.isHalfOpen) {
+            // Fault-aware probe: the probe acquired its permit, but its
+            // operation failed — re-open before release() so the release
+            // path's probe-success close never fires.
+            this.circuit.recordFailure();
+            this.circuit.handleProbeFailure();
+            this.emit(SemaphoreEvents.CIRCUITOPEN, { timeoutRate: 1, recentTimeouts: 1, total: 1, reason: 'half-open-probe-failed' });
+            this.metricsCollector?.markCircuitOpen();
+            if (this.debug) console.warn('[Semaphore] Circuit re-opened: half-open probe operation failed');
+          } else {
+            this.reportFailure();
+          }
+        }
+      }
+      release();
+      throw error;
+    }
   }
 
   /**
@@ -685,6 +755,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.totalAcquired = 0;
     this.totalReleased = 0;
     this.totalTimeouts = 0;
+    this.totalEvictions = 0;
 
     if (options.clearListeners) this.eventListeners.clear();
 
@@ -729,12 +800,34 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     }
     this.metricsCollector?.sampleQueueDepthAt(Date.now(), this.queue.size);
     if (this.debug) console.info(`[Semaphore] Cancelled ${tasks.length} queued tasks`);
-    // Re-arm the scheduler so a pending drain() resolves: emptying the queue may
-    // have left the semaphore idle, but the scheduler can be parked (circuit
-    // open, or half-open with a non-probe head) with no other event coming to
-    // run the drain check. _runScheduler runs that check after its dispatch loop
-    // regardless of circuit state.
+    // Emptying the queue may have left the semaphore idle with no other event
+    // coming (scheduler parked on an open circuit, or backoff deferring it), so
+    // run the drain check directly; schedule() keeps dispatch state consistent.
+    this._checkDrain();
     this.schedule();
+  }
+
+  /**
+   * Feed an external failure signal (e.g. a downstream error) into the
+   * circuit breaker. Records one failure and evaluates the trip condition;
+   * if the circuit trips, queued tasks are evicted with CIRCUIT_OPEN exactly
+   * as on a saturation trip. This is how the default breaker doubles as an
+   * error-rate breaker: report the failures you care about and the same
+   * window, threshold, cooldown, and probe recovery apply.
+   *
+   * Only influences trip decisions while the circuit is closed — probe
+   * outcomes in half-open remain acquisition-based. No-op after shutdown.
+   */
+  public reportFailure(): void {
+    if (this.isShutdown) return;
+    this.circuit.recordFailure();
+    const result = this.circuit.evaluateAndTrip();
+    if (result.tripped) {
+      this.emit(SemaphoreEvents.CIRCUITOPEN, { timeoutRate: result.timeoutRate, recentTimeouts: result.failures, total: result.attempts, reason: 'reported-failure' });
+      this.metricsCollector?.markCircuitOpen();
+      if (this.debug) console.warn(`[Semaphore] Circuit opened via reportFailure(). Rate: ${(result.timeoutRate * 100).toFixed(1)}%`);
+      this._evictQueueOnCircuitOpen();
+    }
   }
 
   /*
@@ -744,9 +837,13 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   /** Returns a snapshot of current operating state, lifetime counters, and windowed metrics. */
   public status() {
     const windowStats = this.metricsCollector?.getSnapshot() ?? null;
-    const oneMin = windowStats?.windows?.['1m']?.counts;
-    const acquired1m = oneMin?.acquired ?? 0;
-    const timeout1m  = oneMin?.timeouts ?? 0;
+    // Rate fields are computed over the shortest configured metrics window
+    // (the 1m window with the default set), so they stay meaningful under a
+    // custom `metricsWindows` instead of silently zeroing on a missing '1m'.
+    const primary = this.metricsCollector !== undefined ? windowStats?.windows?.[this.metricsCollector.primaryLabel]?.counts : undefined;
+    const primarySeconds = (this.metricsCollector?.primaryWindowMs ?? 60000) / 1000;
+    const acquired1m = primary?.acquired ?? 0;
+    const timeout1m  = primary?.timeouts ?? 0;
     // O(1): the enqueue-ordered list's head is always the oldest queued task.
     const oldest = this.enqueueOrder.peekHead();
     const queueAge = oldest === undefined ? 0 : Math.max(0, Date.now() - oldest.enqueueTime);
@@ -761,7 +858,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         circuitOpen:      this.circuit.isOpen,
         circuitHalfOpen:  this.circuit.isHalfOpen,
         backoffDelay:     Math.round(this.backoff.currentDelay),
-        requestsPerSecond: +((acquired1m / 60).toFixed(2)),
+        requestsPerSecond: +((acquired1m / primarySeconds).toFixed(2)),
         timeoutRate1m: (acquired1m + timeout1m) > 0
           ? +((timeout1m / (acquired1m + timeout1m)) * 100).toFixed(1)
           : 0,
@@ -772,6 +869,8 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         totalAcquired:  this.totalAcquired,
         totalReleased:  this.totalReleased,
         totalTimeouts:  this.totalTimeouts,
+        /** Tasks evicted from the queue by a circuit trip (rejected CIRCUIT_OPEN while queued). */
+        totalEvictions: this.totalEvictions,
         circuitBreakerCooldownRemaining: this.circuit.cooldownRemaining,
       },
       metrics: windowStats as SemaphoreMetricsSnapshot | null,
@@ -779,7 +878,12 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   }
 
   public get availablePermits(): number { return this.permits.available; }
-  /** True if the semaphore is not shut down, circuit is not open, and a permit is available. */
+  /**
+   * True if the semaphore is not shut down, the circuit is not open, and a
+   * permit is free. This is a capacity signal, not a dispatch guarantee:
+   * tasks may still be queued ahead (head-of-line fairness), in which case
+   * tryAcquire() returns null even while isAvailable() is true.
+   */
   public isAvailable(): boolean {
     return !this.isShutdown && !this.circuit.isOpen && !this.permits.isFull;
   }

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Semaphore } from '../src/semaphore';
 import { SemaphoreError } from '../src/error';
 import { SemaphoreEvents } from '../src/types';
+import { NoopCircuitBreaker, ManualCircuitBreaker } from '../src/breakers';
 
 function make(count = 2, config: ConstructorParameters<typeof Semaphore>[1] = {}) {
   return new Semaphore(count, { purgeIntervalMs: 500, ...config });
@@ -410,6 +411,31 @@ describe('Semaphore', () => {
       expect(onOpen).toHaveBeenCalled();
     });
 
+    it('evicts remaining queued tasks with CIRCUIT_OPEN when the circuit trips', async () => {
+      const sem = make(2, cbConfig);
+      const releases = await fillPermits(sem, 2);
+      // Five tasks time out at t+50 and trip the circuit (5 failures / 10
+      // attempts = 0.5 >= threshold, min-count guards met).
+      const doomed = Array.from({ length: 5 }, () => sem.acquire().then(() => null, e => e));
+      vi.advanceTimersByTime(30);
+      // Three later tasks with their own deadline at t+80: the trip at t+50
+      // must evict them immediately with CIRCUIT_OPEN, not leave them to
+      // surface a misleading TIMEOUT at t+80.
+      const evicted = Array.from({ length: 3 }, () => sem.acquire().then(() => null, e => e));
+      const onEvict = vi.fn();
+      sem.on(SemaphoreEvents.QUEUEEVICT, onEvict);
+      vi.advanceTimersByTime(20); // t+50: doomed time out -> trip -> eviction
+      expect(sem.status().status.circuitOpen).toBe(true);
+      expect(sem.queueLength).toBe(0); // queue emptied at trip time
+      for (const err of await Promise.all(doomed))  expect(err).toMatchObject({ code: 'TIMEOUT' });
+      for (const err of await Promise.all(evicted)) expect(err).toMatchObject({ code: 'CIRCUIT_OPEN' });
+      // Each eviction is observable: one QUEUEEVICT per task plus a lifetime counter.
+      expect(onEvict).toHaveBeenCalledTimes(3);
+      expect(onEvict).toHaveBeenCalledWith(expect.objectContaining({ id: expect.any(Number), priority: 0, enqueueTime: expect.any(Number), weight: 1 }));
+      expect(sem.status().lifetime.totalEvictions).toBe(3);
+      releases.forEach(r => r());
+    });
+
     it('transitions to half-open after cooldown', async () => {
       const sem = make(2, cbConfig);
       await tripCircuit(sem);
@@ -503,6 +529,136 @@ describe('Semaphore', () => {
   });
 
   // ─── drain() ──────────────────────────────────────────────────────────────
+  // ─── Circuit breaker injection / reportFailure ────────────────────────────
+  describe('circuit breaker injection / reportFailure()', () => {
+    it('an injected NoopCircuitBreaker overrides the numeric options and never trips', async () => {
+      // Aggressive numeric thresholds alongside the instance prove precedence:
+      // the instance wins, so sustained timeouts must not open the circuit.
+      const sem = make(1, {
+        queueMaxTimeout: 50,
+        circuitBreaker: new NoopCircuitBreaker(),
+        circuitBreakerMinThroughput: 1,
+        circuitBreakerMinFailures: 1,
+        circuitBreakerThreshold: 0.01,
+      });
+      const r = await sem.acquire();
+      const doomed = Array.from({ length: 10 }, () => sem.acquire().then(() => null, e => e));
+      vi.advanceTimersByTime(50);
+      for (const err of await Promise.all(doomed)) expect(err).toMatchObject({ code: 'TIMEOUT' });
+      sem.reportFailure(); // also inert against a noop breaker
+      expect(sem.circuitState).toBe('closed');
+      expect(sem.status().status.circuitOpen).toBe(false);
+      r();
+      const r2 = await sem.acquire(); // still fully operational
+      r2();
+    });
+
+    it('a ManualCircuitBreaker acts as an operator kill switch', async () => {
+      const breaker = new ManualCircuitBreaker();
+      const sem = make(1, { circuitBreaker: breaker });
+      const r1 = await sem.acquire();
+      r1();
+      breaker.open();
+      expect(sem.circuitState).toBe('open');
+      await expect(sem.acquire()).rejects.toMatchObject({ code: 'CIRCUIT_OPEN' });
+      expect(sem.tryAcquire()).toBeNull();
+      breaker.close();
+      const r2 = await sem.acquire();
+      expect(r2).toBeTypeOf('function');
+      r2();
+    });
+
+    it('reportFailure() feeds the default breaker and a trip evicts the queue', async () => {
+      const sem = make(1, {
+        queueMaxTimeout: 100000, // no saturation signal — failures come only from reportFailure()
+        circuitBreakerMinThroughput: 2,
+        circuitBreakerMinFailures: 2,
+        circuitBreakerThreshold: 0.5,
+      });
+      const r = await sem.acquire();                          // attempt 1
+      const queued = sem.acquire().then(() => null, e => e);  // attempt 2, waits
+      const onOpen = vi.fn();
+      sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
+      sem.reportFailure();
+      expect(sem.circuitState).toBe('closed'); // 1 failure < minFailures
+      sem.reportFailure(); // 2 failures / 2 attempts -> trip
+      expect(sem.circuitState).toBe('open');
+      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'reported-failure' }));
+      expect(await queued).toMatchObject({ code: 'CIRCUIT_OPEN' }); // evicted, not left to TIMEOUT
+      expect(sem.queueLength).toBe(0);
+      expect(sem.status().lifetime.totalEvictions).toBe(1);
+      r();
+    });
+
+    it('reportFailure() is a no-op after shutdown', () => {
+      const sem = make(1);
+      sem.shutdown();
+      expect(() => sem.reportFailure()).not.toThrow();
+    });
+
+    it('circuitBreakerFailurePredicate scores matching use() rejections and makes probes fault-aware', async () => {
+      const sem = make(1, {
+        circuitBreakerMinThroughput: 2,
+        circuitBreakerMinFailures: 2,
+        circuitBreakerThreshold: 0.5,
+        circuitBreakerCooldown: 1000,
+        circuitBreakerFailurePredicate: e => e instanceof Error && e.message === 'downstream-5xx',
+      });
+
+      // Non-matching rejections are not breaker failures.
+      await expect(sem.use(async () => { throw new Error('client-4xx'); })).rejects.toThrow('client-4xx');
+      await expect(sem.use(async () => { throw new Error('client-4xx'); })).rejects.toThrow('client-4xx');
+      expect(sem.circuitState).toBe('closed');
+
+      // Matching rejections feed the breaker window and trip it.
+      await expect(sem.use(async () => { throw new Error('downstream-5xx'); })).rejects.toThrow();
+      expect(sem.circuitState).toBe('closed'); // 1 failure < minFailures
+      await expect(sem.use(async () => { throw new Error('downstream-5xx'); })).rejects.toThrow();
+      expect(sem.circuitState).toBe('open');
+
+      // Fault-aware probe: a matching failure re-opens instead of closing on release.
+      vi.advanceTimersByTime(1001);
+      const onOpen = vi.fn();
+      sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
+      await expect(sem.use(async () => { throw new Error('downstream-5xx'); })).rejects.toThrow();
+      expect(sem.circuitState).toBe('open');
+      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'half-open-probe-failed' }));
+      expect(sem.availablePermits).toBe(1); // probe permit was still released
+
+      // A probe rejecting with a NON-matching error still closes the circuit.
+      vi.advanceTimersByTime(1001);
+      await expect(sem.use(async () => { throw new Error('client-4xx'); })).rejects.toThrow();
+      expect(sem.circuitState).toBe('closed');
+    });
+
+    it('a throwing predicate is contained and treated as non-matching', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        // Guards aggressive enough that a scored failure WOULD trip — staying
+        // closed proves the thrown predicate was contained and not scored.
+        const sem = make(1, {
+          circuitBreakerMinThroughput: 1,
+          circuitBreakerMinFailures: 1,
+          circuitBreakerThreshold: 0.01,
+          circuitBreakerFailurePredicate: () => { throw new Error('predicate boom'); },
+        });
+        await expect(sem.use(async () => { throw new Error('op failed'); })).rejects.toThrow('op failed');
+        expect(sem.circuitState).toBe('closed');
+        expect(sem.availablePermits).toBe(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('circuitBreakerFailurePredicate threw'), expect.any(Error));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('rejects a non-function circuitBreakerFailurePredicate at construction', () => {
+      // @ts-expect-error invalid predicate
+      expect(() => make(1, { circuitBreakerFailurePredicate: 'boom' })).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+      );
+    });
+  });
+
   describe('drain()', () => {
     it('resolves immediately when idle', async () => {
       await expect(make(1).drain()).resolves.toBeUndefined();
@@ -532,6 +688,24 @@ describe('Semaphore', () => {
       const d = sem.drain(100);
       vi.advanceTimersByTime(100);
       await expect(d).rejects.toMatchObject({ code: 'TIMEOUT' });
+    });
+
+    it('resolves on the final release even while backoff defers the scheduler', async () => {
+      // Backoff-active scheduler wakeups ride an unref'd timer, so drain
+      // resolution must not depend on them: the idle check runs synchronously
+      // in release(). A regression here leaves `resolved` false until the
+      // (never-advanced) backoff timer fires.
+      const sem = make(1, { queueMaxTimeout: 50, backoffInitialTimeout: 5000, backoffMaxTimeout: 5000 });
+      const A = await sem.acquire();
+      const pB = sem.acquire().then(() => null, e => e);
+      vi.advanceTimersByTime(50); // B times out; backoff delay is now ~5000ms
+      expect(await pB).toMatchObject({ code: 'TIMEOUT' });
+      let resolved = false;
+      const drained = sem.drain().then(() => { resolved = true; });
+      A(); // frees the last permit — only microtasks from here, no timer advance
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+      expect(resolved).toBe(true);
+      await drained;
     });
 
     it('rejects if called after shutdown', async () => {
@@ -678,6 +852,57 @@ describe('Semaphore', () => {
     });
   });
 
+  // ─── v1.2.0 additions: peekQueue / capacity / circuitState / metricsWindows ─
+  describe('peekQueue / capacity / circuitState / metricsWindows', () => {
+    it('peekQueue returns a snapshot in enqueue order (not dispatch order)', async () => {
+      const sem = make(1);
+      const r = await sem.acquire();
+      const p1 = sem.acquire(undefined, 5); // enqueued first, lower priority
+      const p2 = sem.acquire(undefined, 1); // enqueued second, would dispatch first
+      const view = sem.peekQueue();
+      expect(view.map(t => t.priority)).toEqual([5, 1]);
+      expect(view[0]).toMatchObject({ weight: 1, isProbe: false });
+      expect(view[0]!.enqueueTime).toBeTypeOf('number');
+      sem.cancel();
+      await Promise.allSettled([p1, p2]);
+      expect(sem.peekQueue()).toEqual([]);
+      r();
+    });
+
+    it('exposes capacity and circuitState', () => {
+      const sem = make(3);
+      expect(sem.capacity).toBe(3);
+      expect(sem.circuitState).toBe('closed');
+    });
+
+    it('metricsWindows overrides the default windows in status().metrics', () => {
+      const sem = make(2, { metricsWindows: [{ size: 10, stepMs: 1000 }] });
+      expect(Object.keys(sem.status().metrics!.windows)).toEqual(['10s']);
+    });
+
+    it('rejects an empty metricsWindows array with INVALID_ARGUMENT', () => {
+      expect(() => make(2, { metricsWindows: [] })).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+      );
+    });
+
+    it('rejects metricsWindows that collide on the same horizon label', () => {
+      // Both cover 60s -> both label '1m' -> would overwrite each other in the snapshot.
+      expect(() => make(2, { metricsWindows: [{ size: 60, stepMs: 1000 }, { size: 6, stepMs: 10000 }] })).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+      );
+    });
+
+    it('computes status() rate fields over the shortest configured window', async () => {
+      const sem = make(2, { metricsWindows: [{ size: 30, stepMs: 1000 }, { size: 10, stepMs: 1000 }] });
+      const r1 = await sem.acquire();
+      const r2 = await sem.acquire();
+      r1(); r2();
+      // 2 acquires over the shortest (10s) window -> 0.2 req/s, not 2/60.
+      expect(sem.status().status.requestsPerSecond).toBe(0.2);
+    });
+  });
+
   // ─── Event emitter ────────────────────────────────────────────────────────
   describe('event emitter', () => {
     it('on / off work correctly', async () => {
@@ -710,12 +935,21 @@ describe('Semaphore', () => {
     });
 
     it('isolates a throwing listener so other listeners still run', () => {
-      const sem = make(1);
-      const after = vi.fn();
-      sem.on(SemaphoreEvents.SHUTDOWN, () => { throw new Error('listener boom'); });
-      sem.on(SemaphoreEvents.SHUTDOWN, after);
-      expect(() => sem.shutdown()).not.toThrow();
-      expect(after).toHaveBeenCalledTimes(1);
+      // Listener exceptions are logged unconditionally via console.warn (a
+      // v1.2.0 change) — capture it so the deliberate throw is asserted
+      // instead of leaking into the test run's stderr.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const sem = make(1);
+        const after = vi.fn();
+        sem.on(SemaphoreEvents.SHUTDOWN, () => { throw new Error('listener boom'); });
+        sem.on(SemaphoreEvents.SHUTDOWN, after);
+        expect(() => sem.shutdown()).not.toThrow();
+        expect(after).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Error in listener'), expect.any(Error));
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('emits task-acquire and task-release without debug mode (fast path)', async () => {
@@ -870,10 +1104,14 @@ describe('Semaphore', () => {
       expect(() => sem.cancel()).not.toThrow();
     });
 
-    it('resolves a pending drain() after cancel() leaves the semaphore idle (scheduler parked)', async () => {
-      // Repro for the cancel()/drain() hang: with the circuit parked open, the
-      // scheduler is not armed, so emptying the queue via cancel() must itself
-      // re-run the drain check — otherwise the pending drain() never resolves.
+    it('resolves a pending drain() after a circuit-trip eviction empties the queue (scheduler parked)', async () => {
+      // Pre-1.2.0 this scenario left C queued while the circuit was open and
+      // the scheduler parked, and cancel() had to re-run the drain check to
+      // unhang a pending drain(). Since 1.2.0 the trip itself evicts C with
+      // CIRCUIT_OPEN, so the queue empties at trip time; drain() then only
+      // waits on the held permit. cancel() must stay a safe no-op on the
+      // emptied queue, and the release — with the scheduler parked on the open
+      // circuit — must still run the drain check.
       vi.useRealTimers();
       const sem = new Semaphore(1, {
         purgeIntervalMs: 100000,
@@ -885,33 +1123,33 @@ describe('Semaphore', () => {
         circuitBreakerMinFailures: 1,
         circuitBreakerThreshold: 0.01,
         // Disable backoff so no delayed scheduler tick is left pending — the
-        // scheduler must be fully parked, otherwise this wouldn't isolate the
-        // cancel()-must-reschedule path.
+        // scheduler must be fully parked to isolate the drain-check path.
         backoffInitialTimeout: 0,
         backoffMaxTimeout: 0,
       });
-      const A = await sem.acquire();              // in-flight
-      const pB = sem.acquire().catch(() => {});   // queued ~0ms, times out ~50ms -> trips circuit
+      const A = await sem.acquire();                        // in-flight
+      const pB = sem.acquire().then(() => null, e => e);    // queued ~0ms, times out ~50ms -> trips circuit
       await new Promise(r => setTimeout(r, 40));
-      const pC = sem.acquire().catch(() => {});   // queued ~40ms, would time out ~140ms
-      await pB;
+      const pC = sem.acquire().then(() => null, e => e);    // queued ~40ms, evicted at ~50ms by the trip
+      expect(await pB).toMatchObject({ code: 'TIMEOUT' });
       expect(sem.status().status.circuitOpen).toBe(true);
-      A();                                        // release -> scheduler parks (circuit open), C queued, permit free
-      await new Promise(r => setTimeout(r, 5));
-      expect(sem.queueLength).toBe(1);
-      expect(sem.availablePermits).toBe(1);
+      // The trip evicted C immediately with CIRCUIT_OPEN — it must not sit out
+      // its own ~140ms deadline and surface a misleading TIMEOUT.
+      expect(await pC).toMatchObject({ code: 'CIRCUIT_OPEN' });
+      expect(sem.queueLength).toBe(0);
+      expect(sem.availablePermits).toBe(0);                 // A still holds the permit
 
-      const drained = sem.drain();
-      sem.cancel();                               // empties the queue; C's own watchdog is cleared
+      const drained = sem.drain();                          // pending: waits on A's release
+      sem.cancel();                                         // no-op on the emptied queue; must not break drain
+      A();                                                  // release -> scheduler parks (circuit open) but must run the drain check
 
-      // With the fix this resolves promptly; a regression hangs until the race timer.
+      // A regression hangs until the race timer.
       const outcome = await Promise.race([
         drained.then(() => 'resolved'),
         new Promise<string>(r => setTimeout(() => r('hung'), 300)),
       ]);
       expect(outcome).toBe('resolved');
 
-      await pC;
       sem.shutdown();
       vi.useFakeTimers();
     });

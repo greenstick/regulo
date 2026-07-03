@@ -1,27 +1,32 @@
 /*
-Circuit Breaker
+Saturation Circuit Breaker
 
-Self-contained state machine.
+The default breaker behind Semaphore, and a self-contained state machine usable
+standalone. It is a windowed failure-rate breaker: what it means depends on the
+signal feeding recordFailure(). Fed queue-acquisition timeouts (the semaphore's
+default wiring) it is a saturation breaker; fed downstream errors (via
+Semaphore.reportFailure(), or directly when standalone) it is an error-rate
+breaker.
 
 Transitions
   closed → open       Failure rate crosses threshold (with min-count guards).
   open → half-open    Cooldown elapses; detected on the next acquire() call.
   half-open → closed  Probe request completes successfully.
-  half-open → open    Probe request times out; full cooldown restarts.
+  half-open → open    Probe request fails; full cooldown restarts.
 
 Transitions are demand-driven: checkAndTransition() is called at the top of
 every acquire() so open → half-open fires on the first request after cooldown,
 not on a background timer.
 
 State transitions are surfaced as return values so the caller (Semaphore) can
-emit events. This keeps CircuitBreaker free of event/metrics dependencies and
+emit events. This keeps the breaker free of event/metrics dependencies and
 usable as a standalone primitive.
 */
 
-import { validateNumber } from "./validation";
-import { SemaphoreError } from './error';
+import { validateNumber } from "../validation";
+import { SemaphoreError } from '../error';
 
-import type { CircuitState, CircuitBreakerConfig, CircuitTripResult } from './types';
+import type { CircuitState, CircuitBreakerConfig, CircuitBreakerStrategy, CircuitTripResult } from '../types';
 
 /*
 CircuitBreakerEventWindow — a minimal bucketed sliding window used exclusively
@@ -34,6 +39,11 @@ class CircuitBreakerEventWindow {
   private readonly size: number;
   private readonly stepMs: number;
 
+  // Current-bucket cache (see CombinedWindow.bucket in ../metrics): hot-path
+  // resolution is two comparisons; the division runs only on step rollover.
+  private cachedIndex = -1;
+  private cachedUntil = 0;
+
   constructor(size: number, stepMs: number) {
     this.size       = size;
     this.stepMs     = stepMs;
@@ -43,6 +53,7 @@ class CircuitBreakerEventWindow {
 
   private idx(): number {
     const now = Date.now();
+    if (now < this.cachedUntil && now >= this.cachedUntil - this.stepMs) return this.cachedIndex;
     const ts = Math.floor(now / this.stepMs) * this.stepMs;
     const i = Math.floor(ts / this.stepMs) % this.size;
     if (this.timestamps[i] !== ts) {
@@ -50,6 +61,8 @@ class CircuitBreakerEventWindow {
       this.buckets[i * 2] = 0;
       this.buckets[i * 2 + 1] = 0;
     }
+    this.cachedIndex = i;
+    this.cachedUntil = ts + this.stepMs;
     return i;
   }
 
@@ -70,12 +83,14 @@ class CircuitBreakerEventWindow {
   }
 
   public reset(): void {
+    this.cachedIndex = -1;
+    this.cachedUntil = 0;
     this.buckets.fill(0);
     this.timestamps.fill(0);
   }
 }
 
-export class CircuitBreaker {
+export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
 
   public state: CircuitState = 'closed';
   private openUntil = 0;
@@ -93,27 +108,27 @@ export class CircuitBreaker {
   constructor(config: CircuitBreakerConfig = {}) {
 
     // (0, 1)
-    this.threshold = validateNumber(config.threshold ?? 0.5, "CircuitBreaker threshold", 0, 1, false, false);
+    this.threshold = validateNumber(config.threshold ?? 0.5, "SaturationCircuitBreaker threshold", 0, 1, false, false);
     // >= 1000
-    this.window = validateNumber(config.window ?? 10000, "CircuitBreaker window", 1000, Number.MAX_SAFE_INTEGER, true, true);
+    this.window = validateNumber(config.window ?? 10000, "SaturationCircuitBreaker window", 1000, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
-    this.windowBucketWidth = validateNumber(config.windowBucketWidth ?? 1000, "CircuitBreaker windowBucketWidth", 1, Number.MAX_SAFE_INTEGER, true, true);
+    this.windowBucketWidth = validateNumber(config.windowBucketWidth ?? 1000, "SaturationCircuitBreaker windowBucketWidth", 1, Number.MAX_SAFE_INTEGER, true, true);
     // >= 1000
-    this.cooldown = validateNumber(config.cooldown ?? 5000, "CircuitBreaker cooldown", 1000, Number.MAX_SAFE_INTEGER, true, true);
+    this.cooldown = validateNumber(config.cooldown ?? 5000, "SaturationCircuitBreaker cooldown", 1000, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
-    this.minThroughput = validateNumber(config.minThroughput ?? 10, "CircuitBreaker minThroughput", 1, Number.MAX_SAFE_INTEGER, true, true);
+    this.minThroughput = validateNumber(config.minThroughput ?? 10, "SaturationCircuitBreaker minThroughput", 1, Number.MAX_SAFE_INTEGER, true, true);
     // > 0
-    this.minFailures = validateNumber(config.minFailures ?? 5, "CircuitBreaker minFailures", 1, Number.MAX_SAFE_INTEGER, true, true);
+    this.minFailures = validateNumber(config.minFailures ?? 5, "SaturationCircuitBreaker minFailures", 1, Number.MAX_SAFE_INTEGER, true, true);
 
     // Default of one 1-second bucket per second of the window; total coverage >= window ms.
     this.eventWindow = new CircuitBreakerEventWindow(Math.ceil(this.window / this.windowBucketWidth), this.windowBucketWidth);
 
     // Integrated Cross-Checks
     if (this.window < this.windowBucketWidth) {
-      throw new SemaphoreError("CircuitBreaker window must be >= windowBucketWidth", 'INVALID_ARGUMENT');
+      throw new SemaphoreError("SaturationCircuitBreaker window must be >= windowBucketWidth", 'INVALID_ARGUMENT');
     }
     if (this.minThroughput < this.minFailures) {
-      throw new SemaphoreError("CircuitBreaker minThroughput must be >= minFailures", 'INVALID_ARGUMENT');
+      throw new SemaphoreError("SaturationCircuitBreaker minThroughput must be >= minFailures", 'INVALID_ARGUMENT');
     }
   }
 
@@ -133,8 +148,8 @@ export class CircuitBreaker {
     if (this.state === 'closed') this.eventWindow.addAcquired();
   }
 
-  /** Records a timeout unconditionally (used for probe timeouts too). */
-  public recordTimeout(): void {
+  /** Records a failure unconditionally (used for probe timeouts too). */
+  public recordFailure(): void {
     this.eventWindow.addTimeout();
   }
 

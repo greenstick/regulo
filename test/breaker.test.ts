@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { CircuitBreaker } from '../src/breaker';
+import { SaturationCircuitBreaker } from '../src/index';
 
 const config = { threshold: 0.5, window: 5000, cooldown: 3000, minThroughput: 5, minFailures: 3 };
 
-function make() { return new CircuitBreaker(config); }
+function make() { return new SaturationCircuitBreaker(config); }
 
-describe('CircuitBreaker', () => {
+describe('SaturationCircuitBreaker', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
@@ -19,7 +19,7 @@ describe('CircuitBreaker', () => {
   describe('evaluateAndTrip', () => {
     it('does not trip below minThroughput', () => {
       const cb = make();
-      for (let i = 0; i < 4; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 4; i++) { cb.trackAttempt(); cb.recordFailure(); }
       expect(cb.evaluateAndTrip()).toMatchObject({ tripped: false });
       expect(cb.isOpen).toBe(false);
     });
@@ -27,20 +27,20 @@ describe('CircuitBreaker', () => {
     it('does not trip below minFailures', () => {
       const cb = make();
       for (let i = 0; i < 5; i++) cb.trackAttempt();
-      for (let i = 0; i < 2; i++) cb.recordTimeout();
+      for (let i = 0; i < 2; i++) cb.recordFailure();
       expect(cb.evaluateAndTrip()).toMatchObject({ tripped: false });
     });
 
     it('does not trip below threshold', () => {
       const cb = make();
       for (let i = 0; i < 10; i++) cb.trackAttempt();
-      for (let i = 0; i < 3; i++) cb.recordTimeout(); // 30% < 50%
+      for (let i = 0; i < 3; i++) cb.recordFailure(); // 30% < 50%
       expect(cb.evaluateAndTrip()).toMatchObject({ tripped: false });
     });
 
     it('trips when threshold and min guards are met', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       const result = cb.evaluateAndTrip();
       expect(result).toMatchObject({ tripped: true, failures: 10, attempts: 10 });
       if (result.tripped) expect(result.timeoutRate).toBe(1);
@@ -49,7 +49,7 @@ describe('CircuitBreaker', () => {
 
     it('returns tripped:false when not closed', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip(); // opens it
       expect(cb.evaluateAndTrip()).toMatchObject({ tripped: false });
     });
@@ -62,14 +62,14 @@ describe('CircuitBreaker', () => {
 
     it('returns false before cooldown elapses', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       expect(cb.checkAndTransition()).toBe(false);
     });
 
     it('transitions to half-open after cooldown and returns true', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
       expect(cb.checkAndTransition()).toBe(true);
@@ -80,7 +80,7 @@ describe('CircuitBreaker', () => {
 
     it('returns false on subsequent calls after transition', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
       cb.checkAndTransition();
@@ -92,14 +92,14 @@ describe('CircuitBreaker', () => {
     it('records when closed', () => {
       const cb = make();
       for (let i = 0; i < 10; i++) cb.trackAttempt();
-      for (let i = 0; i < 5; i++) cb.recordTimeout();
+      for (let i = 0; i < 5; i++) cb.recordFailure();
       const result = cb.evaluateAndTrip();
       expect(result.tripped).toBe(true);
     });
 
     it('skips recording when open', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip(); // now open
       // These should not count
       for (let i = 0; i < 10; i++) cb.trackAttempt();
@@ -114,7 +114,7 @@ describe('CircuitBreaker', () => {
 
     it('skips recording when half-open', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
       cb.checkAndTransition(); // now half-open
@@ -150,7 +150,7 @@ describe('CircuitBreaker', () => {
 
     it('handleProbeSuccess → closed, window reset', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
       cb.checkAndTransition();
@@ -165,7 +165,7 @@ describe('CircuitBreaker', () => {
 
     it('handleProbeFailure → open, cooldown restarted', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
       cb.checkAndTransition();
@@ -183,7 +183,7 @@ describe('CircuitBreaker', () => {
 
     it('returns > 0 when open', () => {
       const cb = make();
-      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+      for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       expect(cb.cooldownRemaining).toBeGreaterThan(0);
     });
@@ -191,7 +191,7 @@ describe('CircuitBreaker', () => {
 
   it('reset restores initial state', () => {
     const cb = make();
-    for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordTimeout(); }
+    for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
     cb.evaluateAndTrip();
     cb.reset();
     expect(cb.isClosed).toBe(true);

@@ -27,6 +27,28 @@ export interface SemaphoreConfig {
   circuitBreakerMinThroughput?: number;
   /** Minimum failures in the window before the circuit can trip. Default: 5 */
   circuitBreakerMinFailures?: number;
+  /**
+   * A circuit breaker instance to use instead of the built-in saturation
+   * breaker. Overrides all `circuitBreaker*` numeric options (the same
+   * precedence `comparator` has over `queueOrder`). See the breakers module:
+   * `SaturationCircuitBreaker` (the default), `NoopCircuitBreaker` (never
+   * trips — a pure limiter), `ManualCircuitBreaker` (an ops kill-switch), or
+   * any object implementing {@link CircuitBreakerStrategy}.
+   */
+  circuitBreaker?: CircuitBreakerStrategy;
+  /**
+   * When set, `use()` feeds rejections from your function into the circuit
+   * breaker: a rejection for which the predicate returns `true` counts as one
+   * breaker failure (as if `reportFailure()` were called), and — unlike
+   * `reportFailure()` — it also makes half-open probes fault-aware: a probe
+   * dispatched through `use()` whose operation fails a matching error re-opens
+   * the circuit instead of closing it on release.
+   *
+   * The predicate must not throw; if it does, the error is logged via
+   * `console.warn` and the rejection is treated as non-matching. Only affects
+   * `use()` — `acquire()`/`tryAcquire()` callers use `reportFailure()`.
+   */
+  circuitBreakerFailurePredicate?: (error: unknown) => boolean;
   /** Reject immediately when all permits are held (no queuing). Default: false */
   rejectOnFull?: boolean;
   /** Milliseconds between stale-task purge sweeps. Min: 500. Default: 3000 */
@@ -52,6 +74,11 @@ export interface SemaphoreConfig {
    * dispatched first. Overrides `queueOrder`. Probe tasks (circuit-breaker
    * half-open) are always sorted ahead of everything else regardless of this
    * comparator, so it never needs to account for them.
+   *
+   * Must be a consistent total order and must not throw. A comparator that
+   * returns `NaN` or a non-number degrades safely to a stable id tie-break,
+   * but a thrown exception propagates out of enqueue/dispatch and can leave
+   * the priority heap partially sifted.
    */
   comparator?: Comparator<QueuedTaskView>;
 }
@@ -94,6 +121,48 @@ export type CircuitTripResult =
   | { tripped: true; timeoutRate: number; failures: number; attempts: number }
   | { tripped: false };
 
+/**
+ * The contract between the Semaphore and any circuit breaker implementation.
+ *
+ * The semaphore drives every breaker through exactly this surface, so any
+ * implementation of it — the built-in saturation breaker, a no-op breaker, a
+ * manual kill-switch, or your own — composes into a `Semaphore` via the
+ * `circuitBreaker` config option. The built-ins live in the breakers module
+ * (`SaturationCircuitBreaker`, `NoopCircuitBreaker`, `ManualCircuitBreaker`).
+ *
+ * Contract notes for implementers:
+ * - `checkAndTransition()` is called at the top of every acquire; return true
+ *   exactly once per open → half-open transition (the semaphore emits
+ *   CIRCUITHALFOPEN when it sees true).
+ * - `evaluateAndTrip()` may only report `tripped: true` for a closed → open
+ *   transition; the semaphore then emits CIRCUITOPEN and evicts the queue.
+ * - The probe-slot methods manage the single half-open probe; implementations
+ *   that never enter half-open may treat them as no-ops.
+ * - Methods must not throw.
+ */
+export interface CircuitBreakerStrategy {
+  readonly state: CircuitState;
+  readonly isOpen: boolean;
+  readonly isHalfOpen: boolean;
+  readonly hasProbeInFlight: boolean;
+  readonly probeTaskId: number | null;
+  readonly cooldownRemaining: number;
+  /** open → half-open when ready; true if the transition just occurred. */
+  checkAndTransition(): boolean;
+  /** Record one admission attempt (called per acquire while relevant). */
+  trackAttempt(): void;
+  /** Record one failure signal (queue timeout, or Semaphore.reportFailure()). */
+  recordFailure(): void;
+  /** Evaluate the trip condition; report trip data if the circuit just opened. */
+  evaluateAndTrip(): CircuitTripResult;
+  markProbeInFlight(): void;
+  claimProbeSlot(taskId: number): void;
+  releaseProbeSlot(): void;
+  handleProbeSuccess(): void;
+  handleProbeFailure(): void;
+  reset(): void;
+}
+
 /*
 Backoff
 */
@@ -114,6 +183,7 @@ export const SemaphoreEvents = {
   TASKTIMEOUT:     'task-timeout',
   TASKABORT:       'task-abort',
   QUEUEPURGE:      'queue-purge',
+  QUEUEEVICT:      'queue-evict',
   CIRCUITOPEN:     'circuit-open',
   CIRCUITHALFOPEN: 'circuit-half-open',
   CIRCUITCLOSE:    'circuit-close',
@@ -134,6 +204,7 @@ export interface SemaphoreEventMap {
   'task-timeout':     [payload: { queueLength: number; backoffDelay: number; taskId: number }];
   'task-abort':       [];
   'queue-purge':      [task: QueuedTaskView];
+  'queue-evict':      [task: QueuedTaskView];
   'circuit-open':     [payload: { timeoutRate: number; recentTimeouts: number; total: number; reason?: string }];
   'circuit-half-open': [];
   'circuit-close':    [];

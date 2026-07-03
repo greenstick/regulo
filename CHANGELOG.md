@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.3.0] - 2026-07-02
+
+### Added
+
+- **Pluggable circuit breakers.** The breaker behind `Semaphore` is now a strategy. The new `CircuitBreakerStrategy` interface (exported) defines the exact contract the semaphore drives, and an instance can be injected via the new `circuitBreaker` config option — it overrides the `circuitBreaker*` numeric options, the same precedence `comparator` has over `queueOrder`. The built-ins live in a breakers module (`src/breakers/`):
+  - `SaturationCircuitBreaker` — the existing default, behavior unchanged; a windowed failure-rate breaker whose meaning follows its signal (queue timeouts → saturation; reported errors → error rate).
+  - `NoopCircuitBreaker` — never trips; the semaphore as a pure limiter.
+  - `ManualCircuitBreaker` — an operator kill switch (`open()`/`close()`); no cooldown, no probe.
+- **`Semaphore.reportFailure()`** — feeds an external failure signal (e.g. downstream 5xx errors) into the breaker, making the default breaker double as an error-rate breaker: the same window, threshold, cooldown, probe recovery, and queue eviction apply, and a trip emits `CIRCUITOPEN` with `reason: 'reported-failure'`. Reported failures influence trip decisions only while the circuit is closed; no-op after shutdown.
+- **`circuitBreakerFailurePredicate` config option** — declarative fault scoring for `use()`. Rejections from your function for which the predicate returns `true` count as one breaker failure each (as via `reportFailure()`), and half-open probes become fault-aware: a probe dispatched through `use()` whose operation fails with a matching error re-opens the circuit (`CIRCUITOPEN` with `reason: 'half-open-probe-failed'`) instead of closing it on release; a non-matching rejection still counts as a successful probe. A predicate that throws is logged via `console.warn` and treated as non-matching. Only observes `use()` — bare `acquire()`/`tryAcquire()` callers use `reportFailure()`.
+- Exported the `CircuitState` type from the package root.
+
+### Changed (BREAKING)
+
+- **Renamed the breaker's public names to match the breakers module.** The `CircuitBreaker` export is now `SaturationCircuitBreaker`, and its `recordTimeout()` method is now `recordFailure()` (the failure signal is caller-defined, not inherently a timeout). Both are straight renames with unchanged behavior; no compatibility aliases are kept. Migration: `import { CircuitBreaker } from 'regulo'` → `import { SaturationCircuitBreaker } from 'regulo'`; `breaker.recordTimeout()` → `breaker.recordFailure()`. Shipping this rename in a minor release is a deliberate project decision, documented here and in the README, in place of carrying aliases forward.
+
+### Performance
+
+- **Current-bucket caching in the metrics and breaker windows.** Hot-path bucket resolution is now two comparisons instead of a float division + modulo + timestamp check per event per window; the full computation runs only on step rollover. Measured on the benchmark suite: uncontended `tryAcquire`+`release` ≈ +80%, `use()` round-trip ≈ +65%, contended throughput ≈ +30–50%.
+- **Pre-bound scheduler callback** — scheduler wakeups no longer allocate a fresh closure per `schedule()` on the contended path.
+
+[1.3.0]: https://github.com/greenstick/regulo/releases/tag/v1.3.0
+
 ## [v1.2.0] - 2026-07-02
 
 ### Added
@@ -12,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`peekQueue()` method:** Provides a read-only snapshot array of the current queue state in strict enqueue order (`QueuedTaskView[]`).
 - **`capacity` and `circuitState` getters:** Publicly exposes the total configured permit capacity and the active state of the circuit breaker (`'closed' | 'open' | 'half-open'`) directly on the `Semaphore` instance.
 - **Customizable circuit breaker window buckets:** Added the `circuitBreakerWindowBucketWidth` configuration property to tune the granularity/resolution of the circuit breaker's sliding failure window.
-- **Customizable metrics windows:** Added the `metricsWindows` configuration option to override the built-in time windows (1m/5m/15m/1h/24h) with bespoke tracking horizons. Exported the underlying `WindowOptions` type from the package root.
+- **Customizable metrics windows:** Added the `metricsWindows` configuration option to override the built-in time windows (1m/5m/15m/1h/24h) with bespoke tracking horizons. Exported the underlying `WindowOptions` type from the package root. Windows that collide on the same horizon label (which would silently overwrite each other in the snapshot) are rejected at construction with `INVALID_ARGUMENT`.
+- **`QUEUEEVICT` event and `totalEvictions` lifetime counter:** Tasks evicted by a circuit trip are now observable — one `QUEUEEVICT` event (payload: `QueuedTaskView`) per evicted task, plus a `totalEvictions` counter in `status().lifetime`, so eviction volume is distinguishable from ordinary open-circuit rejections.
 
 ### Changed
 
@@ -21,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unconditional listener exception logging:** Errors thrown inside attached event listeners are now always surfaced via `console.warn` instead of being silenced when `debug: false` is active.
 - **Shared `drain()` promise semantics:** Clarified that concurrent, overlapping invocations of `drain()` return the identical in-flight promise. The `timeoutMs` parameter of the *first* caller governs the cycle; subsequent caller deadlines are bypassed.
 - **Standardized internal validation errors:** Attempting to double-insert a node into the internal heap or initializing metrics with an empty array now properly throws a `SemaphoreError` with the `INVALID_ARGUMENT` code rather than a generic runtime `Error`.
+- **`tryAcquire()` no longer records a circuit-breaker attempt.** Previously every `tryAcquire` call — including ones that returned `null` — counted toward the breaker window's attempt denominator, diluting the timeout rate. Since `tryAcquire` can never queue (and therefore never time out), it no longer participates in breaker accounting at all. In `tryAcquire`-heavy workloads the breaker now trips somewhat more readily than in 1.1.0.
+- **`status().metrics` returns `null` after `shutdown()`** (previously a zeroed snapshot). The collector's typed-array buffers are released on shutdown.
+- **`status()` rate fields are computed over the shortest configured metrics window** (`requestsPerSecond`, `timeoutRate1m`). With the default windows this is the 1m window, unchanged; with custom `metricsWindows` the fields previously looked up a hard-coded `'1m'` label and silently reported 0 when it was absent.
+
+### Fixed
+
+- **`drain()` resolution no longer depends on a scheduler tick.** The idle check now runs synchronously at every transition that can reach idle (release, timeout, abort, purge, `cancel()`). Previously it ran only on scheduler wakeups, which adaptive backoff defers on an *unref'd* timer — delaying drain resolution by up to the backoff delay and, in a process with nothing else keeping the event loop alive, allowing exit before a pending `drain()` resolved.
 
 [1.2.0]: https://github.com/greenstick/regulo/releases/tag/v1.2.0
 

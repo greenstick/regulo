@@ -4,8 +4,10 @@ export { Semaphore } from './semaphore';
 // Error class — needed for instanceof checks and error code inspection
 export { SemaphoreError } from './error';
 
-// Standalone circuit breaker — usable independently of the semaphore
-export { CircuitBreaker } from './breaker';
+// Circuit breakers — each composable into a Semaphore via the `circuitBreaker`
+// config option, and usable standalone. (Renamed in 1.3.0: the former
+// `CircuitBreaker` export is now `SaturationCircuitBreaker`.)
+export { SaturationCircuitBreaker, NoopCircuitBreaker, ManualCircuitBreaker } from './breakers';
 
 // Events const — use SemaphoreEvents.CIRCUITOPEN etc. in on() calls
 export { SemaphoreEvents } from './types';
@@ -23,6 +25,8 @@ export type {
   SemaphoreMetricsSnapshot,
   SemaphoreMetricsWindowSnapshot,
   CircuitBreakerConfig,
+  CircuitBreakerStrategy,
+  CircuitState,
   CircuitTripResult,
   Comparator,
   QueueOrder,
