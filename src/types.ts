@@ -67,8 +67,14 @@ export interface SemaphoreConfig {
    * - 'fifoWithPriority' (default): priority primary, earliest-enqueued first on ties.
    * - 'lifoWithPriority': priority primary, latest-enqueued first on ties.
    * Default: 'fifoWithPriority'
+   *
+   * Typed as `QueueOrder | (string & {})` rather than plain `QueueOrder` so a
+   * runtime string (e.g. from `process.env`) is assignable without a cast,
+   * while editors still suggest the four literal values. Anything outside the
+   * known set throws `INVALID_ARGUMENT` at construction — see
+   * `resolveComparator` in `ordering.ts`.
    */
-  queueOrder?: QueueOrder;
+  queueOrder?: QueueOrder | (string & {});
   /**
    * Custom comparator over queued tasks; the value that sorts lower is
    * dispatched first. Overrides `queueOrder`. Probe tasks (circuit-breaker

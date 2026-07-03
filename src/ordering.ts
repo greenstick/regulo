@@ -39,7 +39,7 @@ export const QUEUE_ORDERINGS: Record<QueueOrder, Comparator<QueuedTaskView>> = {
 };
 
 export interface OrderingConfig {
-  queueOrder?: QueueOrder;
+  queueOrder?: QueueOrder | (string & {});
   comparator?: Comparator<QueuedTaskView>;
 }
 
@@ -61,7 +61,7 @@ export function resolveComparator(config: OrderingConfig): Comparator<QueuedTask
     return config.comparator;
   }
   const order = config.queueOrder ?? 'fifoWithPriority';
-  const cmp = QUEUE_ORDERINGS[order];
+  const cmp = QUEUE_ORDERINGS[order as QueueOrder];
   if (cmp === undefined) {
     throw new SemaphoreError(
       `Semaphore queueOrder must be one of: ${Object.keys(QUEUE_ORDERINGS).join(', ')} (got ${JSON.stringify(order)})`,

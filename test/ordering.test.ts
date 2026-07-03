@@ -51,7 +51,6 @@ describe('resolveComparator', () => {
   });
 
   it('throws on an unknown preset', () => {
-    // @ts-expect-error invalid
     expect(() => resolveComparator({ queueOrder: 'nope' })).toThrow(/queueOrder must be one of/);
   });
 

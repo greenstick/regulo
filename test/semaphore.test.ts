@@ -39,7 +39,6 @@ describe('Semaphore', () => {
       expect(() => new Semaphore(0)).toThrow(
         expect.objectContaining({ name: 'SemaphoreError', code: 'INVALID_ARGUMENT' })
       );
-      // @ts-expect-error invalid preset
       expect(() => make(1, { queueOrder: 'bogus' })).toThrow(
         expect.objectContaining({ code: 'INVALID_ARGUMENT' })
       );
@@ -247,7 +246,6 @@ describe('Semaphore', () => {
     });
 
     it('rejects an invalid queueOrder at construction', () => {
-      // @ts-expect-error invalid preset
       expect(() => make(1, { queueOrder: 'bogus' })).toThrow(/queueOrder must be one of/);
     });
 
