@@ -536,18 +536,18 @@ concurrency, the circuit breakers on per-call overhead.
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `tryAcquire` + `release` | 2.56M | 2.96x slower |
-| `tryAcquire` + `release` (no metrics) | 7.58M | fastest |
-| `use()` round-trip | 1.06M | 7.16x slower |
-| `use()` round-trip (no metrics) | 1.41M | 5.36x slower |
+| `tryAcquire` + `release` | 3.07M | 2.90x slower |
+| `tryAcquire` + `release` (no metrics) | 8.91M | fastest |
+| `use()` round-trip | 1.24M | 7.16x slower |
+| `use()` round-trip (no metrics) | 1.79M | 4.97x slower |
 
 **🎛️ Weighted acquire, uncontended**
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `use()` weight=1 | 1.08M | 1.02x slower |
-| `use()` weight=4 | 1.11M | fastest |
-| `use()` weight=16 | 1.07M | 1.04x slower |
+| `use()` weight=1 | 1.24M | 1.03x slower |
+| `use()` weight=4 | 1.26M | 1.01x slower |
+| `use()` weight=16 | 1.28M | fastest |
 
 Weighted permits add no meaningful overhead regardless of weight — claiming
 16 burners at once costs about the same as claiming one.
@@ -556,18 +556,18 @@ Weighted permits add no meaningful overhead regardless of weight — claiming
 
 | Scenario | tasks/sec | vs. fastest |
 |---|--:|---|
-| concurrency=4 | 666.1k | 1.08x slower |
-| concurrency=16 | 673.7k | 1.07x slower |
-| concurrency=64 | 719.4k | fastest |
-| concurrency=16, random priority | 614.0k | 1.17x slower |
+| concurrency=4 | 843.2k | 1.03x slower |
+| concurrency=16 | 856.6k | 1.02x slower |
+| concurrency=64 | 871.9k | fastest |
+| concurrency=16, random priority | 761.2k | 1.15x slower |
 
 **📈 `status()` snapshot cost**
 
 | Queue depth | ops/sec | vs. fastest |
 |---|--:|---|
-| 0 | 655.0k | 1.03x slower |
-| 100 | 630.5k | 1.07x slower |
-| 1000 | 673.8k | fastest |
+| 0 | 764.8k | fastest |
+| 100 | 754.3k | 1.01x slower |
+| 1000 | 757.0k | 1.01x slower |
 
 `status()` is O(1) in queue depth — the cost is flat across queue depths (within
 run-to-run noise) because queue age is read from an enqueue-ordered index rather
@@ -578,31 +578,31 @@ scrape path for arbitrarily long task queues.
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 3.34M | fastest |
-| p-limit | 1.01M | 3.29x slower |
-| p-queue | 1.06M | 3.14x slower |
-| regulo (no metrics) | 1.51M | 2.22x slower |
-| regulo | 1.10M | 3.05x slower |
+| cockatiel (bulkhead) | 4.11M | fastest |
+| p-limit | 1.25M | 3.29x slower |
+| p-queue | 1.25M | 3.30x slower |
+| regulo (no metrics) | 1.72M | 2.40x slower |
+| regulo | 1.24M | 3.33x slower |
 
 **📊 regulo vs. other libraries — contended throughput @ concurrency=16** (tasks/sec)
 
 | Library | tasks/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 1.53M | fastest |
-| p-queue | 919.3k | 1.66x slower |
-| regulo (no metrics) | 879.9k | 1.74x slower |
-| p-limit | 848.0k | 1.80x slower |
-| regulo | 670.9k | 2.28x slower |
+| cockatiel (bulkhead) | 1.70M | fastest |
+| p-queue | 1.03M | 1.65x slower |
+| regulo (no metrics) | 1.04M | 1.64x slower |
+| p-limit | 903.5k | 1.89x slower |
+| regulo | 836.6k | 2.04x slower |
 
 **🛡️ Circuit breaker overhead — closed/healthy circuit**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| regulo `ManualCircuitBreaker` | 5.00M | fastest |
-| regulo `NoopCircuitBreaker` | 4.82M | 1.04x slower |
-| regulo `SaturationCircuitBreaker` | 3.37M | 1.48x slower |
-| cockatiel (circuitBreaker) | 2.73M | 1.83x slower |
-| opossum | 1.66M | 3.02x slower |
+| regulo `ManualCircuitBreaker` | 5.06M | fastest |
+| regulo `NoopCircuitBreaker` | 4.72M | 1.07x slower |
+| regulo `SaturationCircuitBreaker` | 3.85M | 1.31x slower |
+| cockatiel (circuitBreaker) | 2.80M | 1.81x slower |
+| opossum | 1.53M | 3.31x slower |
 
 The picture is consistent. Cockatiel's bulkhead is the fastest limiter — and
 **Regulo** trades raw limiter throughput for an integrated priority heap, weighted
