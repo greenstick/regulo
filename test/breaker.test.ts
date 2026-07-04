@@ -203,3 +203,35 @@ describe('SaturationCircuitBreaker', () => {
     expect(cb.evaluateAndTrip()).toMatchObject({ tripped: false });
   });
 });
+
+describe('SaturationCircuitBreaker config and bucket edge cases', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('rejects window < windowBucketWidth', () => {
+    expect(() => new SaturationCircuitBreaker({ window: 1000, windowBucketWidth: 2000 })).toThrow(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+    );
+  });
+
+  it('keeps bucket counts when the clock steps backwards into an already-written bucket', () => {
+    const b = new SaturationCircuitBreaker({
+      threshold: 0.5, window: 5000, windowBucketWidth: 1000,
+      minThroughput: 4, minFailures: 4,
+    });
+    // Two failures in bucket N (second is a bucket-cache hit), advance one
+    // bucket, one more, then step back into bucket N: the write must add to
+    // the preserved bucket, not clear it.
+    b.trackAttempt(); b.recordFailure();
+    b.trackAttempt(); b.recordFailure();
+    vi.advanceTimersByTime(1000);
+    b.trackAttempt(); b.recordFailure();
+    vi.setSystemTime(Date.now() - 1000);
+    b.trackAttempt(); b.recordFailure();
+    vi.setSystemTime(Date.now() + 1000);
+    // 4 attempts / 4 failures across the window → rate 1.0 → trips. If the
+    // backward-clock write had cleared bucket N, only 2 would remain and the
+    // min-count guards would block the trip.
+    expect(b.evaluateAndTrip()).toMatchObject({ tripped: true, failures: 4, attempts: 4 });
+  });
+});

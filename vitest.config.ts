@@ -6,9 +6,11 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary', 'lcov'],
-      // branches trails lines (currently ~89% overall); the floor catches a
-      // branch-coverage regression that a lines-only threshold would miss.
-      thresholds: { lines: 90, branches: 85 },
+      // Lines and functions are at 100%; branches sit at ~97.8% because the
+      // remainder are defensive arms unreachable through the public API
+      // (e.g. Semaphore._dequeue miss, _fireTimeout shutdown guard). The
+      // floors lock in the current baseline against regression.
+      thresholds: { lines: 100, functions: 100, branches: 97 },
     },
   },
 });

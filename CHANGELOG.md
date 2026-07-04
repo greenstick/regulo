@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.3.5] - 2026-07-04
+
+### Added
+
+- **`totalPurged` lifetime counter** in `status().lifetime` and `getSnapshot().meta` — tasks ejected by the stale-task purge (`queueMaxAge` exceeded, rejected `PURGED`) now have their own counter.
+
+### Changed
+
+- **Purged tasks no longer count as timeouts.** Previously a purge incremented `totalTimeouts` and the windowed timeout counts (inflating `timeoutRate1m` and dashboard timeout rates) while *not* feeding the circuit breaker — an inconsistent middle ground. Purges are janitorial: they now count only in `totalPurged` (plus a queue-depth gauge sample) and stay out of both the timeout rate and the breaker. If you monitored purge volume through `totalTimeouts`, read `totalPurged` instead.
+- **Breaker attempt tracking moved to the admission points.** `trackAttempt()` now fires exactly where admission happens — a granted fast-path acquire or a task enqueued — instead of at the top of `acquire()`. Two consequences: `tryAcquire()` grants now count toward the breaker's throughput (previously they never did, so a `tryAcquire()` + `reportFailure()` app could never trip the breaker — attempts stayed below `circuitBreakerMinThroughput` forever); and rejected admissions (`QUEUE_FULL`, `rejectOnFull`, a null `tryAcquire()`) no longer count, so shed load no longer dilutes the failure rate exactly when the system is overloaded. The `CircuitBreakerStrategy.trackAttempt()` contract note is updated to match.
+- **`shutdown()` now invalidates outstanding release closures** (as `reset()` always has) and settles the permit pool. A `release()` arriving after shutdown is a safe no-op instead of mutating the dead pool, and post-shutdown `status()` reads as terminal (`pendingReleases: 0`, all permits available).
+
+### Performance
+
+- **The attempt-tracking fix has a measured cost on the raw `tryAcquire` fast path with the default breaker.** Counting an attempt buckets it by time, which costs one `Date.now()` per grant — a path that previously had zero clock reads when metrics are disabled. Interleaved A/B on the benchmark suite: `tryAcquire`+`release` (no metrics) ≈ **-40%** (~8.3M → ~5.0M ops/sec); this is the price of the breaker actually seeing `tryAcquire` traffic (previously it was blind to it — the bug fixed above). All other paths are at parity or better: with metrics enabled the clock read is shared with the metrics rollup, so `tryAcquire`+`release` is within noise of the previous release and the `use()` round-trip is ~10% *faster* (one `Date.now()` per admission instead of two). If you use the semaphore as a pure limiter, `NoopCircuitBreaker` skips attempt bucketing entirely and restores the clock-free fast path (~7.3M ops/sec, within ~12% of the previous release — the residual is the strategy call itself).
+- `SaturationCircuitBreaker.trackAttempt(now?)` accepts an optional caller-supplied timestamp (and the `CircuitBreakerStrategy` contract documents it) so a caller that already read the clock for the same admission doesn't pay a second read. The fast-path grant no longer allocates a wrapper object.
+
+### Fixed
+
+- **Scheduler dispatch can no longer leak permits on a lost claim race.** Permits, counters, and metrics for a queued dispatch are now committed inside the dispatch callback, which runs only after the task wins its one-shot `claim()`. Previously permits were acquired before the claim check; the defensive `dispatch() === false` path (unreachable through the public API today, but guarded) would have leaked them permanently.
+- **`use()` no longer infers probe-ness from circuit state after acquiring.** Whether an acquisition is the half-open probe is now reported by the acquisition itself. Previously `use()` read `circuit.isHalfOpen` on the continuation after `acquire()` resolved, which raced against transitions occurring in between — a mislabeled acquisition could re-open the circuit on an ordinary matching failure.
+- Removed the dead `triggeringTask` exclusion from circuit-trip queue eviction (the watchdog dequeues the triggering task before eviction runs, so it could never match). The probe-skip guard is retained deliberately: it protects against an injected breaker that trips outside the closed state, where evicting the live probe would wedge the circuit in half-open.
+
 ## [v1.3.0] - 2026-07-02
 
 ### Added

@@ -77,6 +77,7 @@ export class Semaphore {
   private totalAcquired    = 0;
   private totalReleased    = 0;
   private totalTimeouts    = 0;
+  private totalPurged      = 0;
   private totalEvictions   = 0;
   private eventListeners   = new Map<SemaphoreEventType, Set<(...args: any[]) => void>>();
   private drainPromise:    Promise<void> | null = null;
@@ -195,13 +196,37 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   }
 
   // Fast-path Acquire
+  //
+  // Attempt tracking lives here and in _enqueue — the two places admission
+  // actually happens — rather than in each public entry point. That counts
+  // tryAcquire() grants, keeps acquire() and tryAcquire() structurally unable
+  // to double-count a single admission, and excludes rejected admissions
+  // (QUEUE_FULL, a null tryAcquire): no operation follows them, so counting
+  // them would dilute the breaker's failure rate exactly when shedding load.
+  //
+  // Returns the bare release closure — no wrapper allocation on the hottest
+  // path in the library. Callers that need to know whether the grant was the
+  // half-open probe (use(), via _acquire) read `circuit.isHalfOpen` *before*
+  // this call: the check and the grant are synchronous, so unlike a post-await
+  // read it cannot race a transition, and in half-open the only grantable
+  // fast-path acquisition is the probe.
   private _tryAcquireFast(weight: number): (() => void) | null {
     if (this.circuit.isHalfOpen) {
       if (this.circuit.hasProbeInFlight || !this.permits.hasCapacityFor(weight)) return null;
       this.circuit.markProbeInFlight();
       this.permits.acquire(weight);
       this.totalAcquired++;
-      this.metricsCollector?.onAcquireFast(Date.now(), this.permits.inFlight, this.queue.size);
+      // One clock read per admission, shared between the breaker's attempt
+      // window and the metrics rollup. Without metrics the breaker reads the
+      // clock itself only if it actually buckets attempts (the saturation
+      // breaker while closed); no-op breakers stay clock-free.
+      if (this.metricsCollector !== undefined) {
+        const now = Date.now();
+        this.circuit.trackAttempt(now);
+        this.metricsCollector.onAcquireFast(now, this.permits.inFlight, this.queue.size);
+      } else {
+        this.circuit.trackAttempt();
+      }
       if (this.hasListeners(SemaphoreEvents.TASKACQUIRE)) {
         this.emit(SemaphoreEvents.TASKACQUIRE, { queued: this.queue.size, running: this.permits.capacity - this.permits.available, probe: true });
       }
@@ -221,7 +246,14 @@ constructor(count: number, config: SemaphoreConfig = {}) {
 
     this.permits.acquire(weight);
     this.totalAcquired++;
-    this.metricsCollector?.onAcquireFast(Date.now(), this.permits.inFlight, this.queue.size);
+    // Shared clock read — see the probe branch above.
+    if (this.metricsCollector !== undefined) {
+      const now = Date.now();
+      this.circuit.trackAttempt(now);
+      this.metricsCollector.onAcquireFast(now, this.permits.inFlight, this.queue.size);
+    } else {
+      this.circuit.trackAttempt();
+    }
     if (this.hasListeners(SemaphoreEvents.TASKACQUIRE)) {
       this.emit(SemaphoreEvents.TASKACQUIRE, { queued: this.queue.size, running: this.permits.capacity - this.permits.available });
     }
@@ -286,6 +318,10 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   */
 
   private _enqueue(task: QueuedTask): void {
+    // Admission-time attempt tracking (see _tryAcquireFast): a queued task
+    // counts as an attempt now so that a later timeout scores against a
+    // denominator that includes it.
+    this.circuit.trackAttempt();
     this.queue.insert(task);
     this.enqueueOrder.pushTail(task);
     this._armTimeout();
@@ -357,14 +393,18 @@ constructor(count: number, config: SemaphoreConfig = {}) {
   // When the circuit trips open, queued callers would otherwise sit until
   // their individual queueMaxTimeout elapses and surface a misleading
   // TIMEOUT error. Evict them immediately with CIRCUIT_OPEN instead. On a
-  // timeout-driven trip the task that triggered it is excluded — it's
-  // rejected separately by the caller; a reportFailure()-driven trip has no
-  // triggering task.
-  private _evictQueueOnCircuitOpen(triggeringTask?: QueuedTask) {
+  // timeout-driven trip the task that triggered it never appears here — the
+  // watchdog dequeues it before running the timeout side effects.
+  private _evictQueueOnCircuitOpen() {
     if (this.queue.size === 0) return;
     let evicted = 0;
     for (const task of this.queue.toArray()) {
-      if (task === triggeringTask || task.isProbe) continue;
+      // A compliant breaker only trips from closed, and a probe can only be
+      // queued in half-open — so no probe should ever be present here. The
+      // breaker is injectable, though, and evicting a live probe would wedge
+      // the circuit in half-open permanently, so guard against a strategy
+      // that violates the contract.
+      if (task.isProbe) continue;
       const discarded = task.discard(new SemaphoreError("Circuit breaker opened while task was queued", "CIRCUIT_OPEN"));
       this._dequeue(task);
       if (discarded) {
@@ -397,7 +437,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         this.emit(SemaphoreEvents.CIRCUITOPEN, { timeoutRate: result.timeoutRate, recentTimeouts: result.failures, total: result.attempts });
         this.metricsCollector?.markCircuitOpen();
         if (this.debug) console.warn(`[Semaphore] Circuit opened. Rate: ${(result.timeoutRate * 100).toFixed(1)}%`);
-        this._evictQueueOnCircuitOpen(task);
+        this._evictQueueOnCircuitOpen();
       }
     }
 
@@ -474,13 +514,19 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         // Draining to empty cancels the shared watchdog so it doesn't keep the
         // process alive (or wake it) after there's nothing left to time out.
         if (this.enqueueOrder.size === 0) this._clearTimeout();
-        const now = Date.now();
-        const waitMs = Math.max(0, now - task.enqueueTime);
-        this.permits.acquire(task.weight);
-        this.totalAcquired++;
-        this.metricsCollector?.onAcquireQueued(now, waitMs, this.permits.inFlight, this.queue.size);
-        this.permits.assertInvariant(this.debug);
-        const dispatched = task.dispatch(() => this._createRelease(task.isProbe, task.weight));
+        // Permits, counters, and metrics are all committed inside the dispatch
+        // callback, which runs only after the task wins claim(). A task
+        // already finalized by another terminal path therefore costs nothing
+        // here — in particular, it cannot leak the permits it never took.
+        const dispatched = task.dispatch(() => {
+          const now = Date.now();
+          const waitMs = Math.max(0, now - task.enqueueTime);
+          this.permits.acquire(task.weight);
+          this.totalAcquired++;
+          this.metricsCollector?.onAcquireQueued(now, waitMs, this.permits.inFlight, this.queue.size);
+          this.permits.assertInvariant(this.debug);
+          return this._createRelease(task.isProbe, task.weight);
+        });
         if (dispatched && this.hasListeners(SemaphoreEvents.TASKACQUIRE)) {
           this.emit(SemaphoreEvents.TASKACQUIRE, {
             queued: this.queue.size,
@@ -527,8 +573,12 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       // maintenance when this empties the queue.
       this._dequeue(head);
       if (discarded) {
-        this.totalTimeouts++;
-        this.metricsCollector?.onTimeout(Date.now(), this.queue.size);
+        // Purges are janitorial (queueMaxAge is a backstop, PURGED its own
+        // error code): they get their own counter and never enter the
+        // windowed timeout rate or the breaker — a genuinely saturated queue
+        // trips via real timeouts long before queueMaxAge.
+        this.totalPurged++;
+        this.metricsCollector?.onPurge(Date.now(), this.queue.size);
         // Emit the narrow QueuedTaskView shape the type declares, not the raw
         // internal QueuedTask (which carries heap/list links and one-shot
         // finalization methods that a listener has no business touching).
@@ -575,6 +625,27 @@ constructor(count: number, config: SemaphoreConfig = {}) {
    * @param weight Permits to consume (integer in 1..count). Defaults to 1.
    */
   public acquire(abortSignal?: AbortSignal, priority = 0, weight = 1): Promise<() => void> {
+    return this._acquire(abortSignal, priority, weight);
+  }
+
+  // Whether the admission made by the most recent _acquire() call was the
+  // half-open probe. Set synchronously inside _acquire (at the grant or at
+  // enqueue — where probe-ness is decided) and read synchronously by use()
+  // immediately after the call returns, before any await. That makes the
+  // probe label race-free without allocating a wrapper per resolution:
+  // reading `circuit.isHalfOpen` after the acquire promise settles (the old
+  // scheme) raced against transitions between resolution and the awaiting
+  // continuation, and a mislabeled probe could re-open the circuit on an
+  // ordinary failure. Single-threaded synchronous write→read; later
+  // _acquire calls overwrite it, which is fine — each caller reads its own
+  // admission before yielding.
+  private lastAdmissionWasProbe = false;
+
+  // Full acquire pipeline. Sets `lastAdmissionWasProbe` synchronously; the
+  // promise resolves with the bare release closure (no per-resolution
+  // wrapper object — this is the contended hot path).
+  private _acquire(abortSignal?: AbortSignal, priority = 0, weight = 1): Promise<() => void> {
+    this.lastAdmissionWasProbe = false;
     if (this.isShutdown) return Promise.reject(new SemaphoreError('Semaphore is shut down', 'SHUTDOWN'));
     if (!Number.isInteger(weight) || weight < 1 || weight > this.permits.capacity) {
       return Promise.reject(new SemaphoreError(`Invalid weight: ${weight} (must be integer in 1..${this.permits.capacity})`, 'INVALID_WEIGHT'));
@@ -602,10 +673,14 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       return Promise.reject(new SemaphoreError('Semaphore acquire aborted before start', 'ABORTED'));
     }
 
-    this.circuit.trackAttempt();
-
+    // Synchronous pre-check: a fast-path grant made while half-open is, by
+    // construction, the probe (see _tryAcquireFast).
+    const grantIsProbe = this.circuit.isHalfOpen;
     const release = this._tryAcquireFast(weight);
-    if (release) return Promise.resolve(release);
+    if (release) {
+      this.lastAdmissionWasProbe = grantIsProbe;
+      return Promise.resolve(release);
+    }
 
     const isHalfOpenProbe = this.circuit.isHalfOpen && !this.circuit.hasProbeInFlight;
 
@@ -616,6 +691,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
       return Promise.reject(new SemaphoreError(`Queue full (${this.queueMaxLength})`, 'QUEUE_FULL'));
     }
 
+    this.lastAdmissionWasProbe = isHalfOpenProbe;
     return new Promise<() => void>((resolve, reject) => {
       const taskId = ++this.taskIdCounter;
       const enqueueTime = Date.now();
@@ -659,12 +735,13 @@ constructor(count: number, config: SemaphoreConfig = {}) {
    * @param weight Permits to consume (integer in 1..count). Defaults to 1.
    */
   public async use<T>(fn: () => Promise<T>, abortSignal?: AbortSignal, priority = 0, weight = 1): Promise<T> {
-    const release = await this.acquire(abortSignal, priority, weight);
-    // In half-open exactly one acquisition — the probe — can be granted, and
-    // the circuit cannot leave half-open while that probe's permit is held, so
-    // observing half-open here identifies this acquisition as the probe. Only
-    // needed when failures are fault-scored below.
-    const isProbeAcquisition = this.failurePredicate !== undefined && this.circuit.isHalfOpen;
+    // Probe-ness comes from the admission itself: _acquire records it
+    // synchronously and we read it before yielding, so a circuit transition
+    // between promise resolution and this continuation cannot mislabel an
+    // ordinary acquisition as the probe.
+    const pending = this._acquire(abortSignal, priority, weight);
+    const isProbeAcquisition = this.failurePredicate !== undefined && this.lastAdmissionWasProbe;
+    const release = await pending;
     try {
       const result = await fn();
       release();
@@ -755,6 +832,7 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     this.totalAcquired = 0;
     this.totalReleased = 0;
     this.totalTimeouts = 0;
+    this.totalPurged = 0;
     this.totalEvictions = 0;
 
     if (options.clearListeners) this.eventListeners.clear();
@@ -780,6 +858,13 @@ constructor(count: number, config: SemaphoreConfig = {}) {
     for (const task of this.queue.toArray()) task.discard(new SemaphoreError(reason, 'SHUTDOWN'));
     this.queue.clear();
     this.enqueueOrder.clear();
+    // Invalidate outstanding release closures (as reset() does) and settle the
+    // pool, so a release arriving after shutdown is a no-op instead of
+    // mutating a dead semaphore, and post-shutdown status() reads as terminal
+    // rather than permanently "held".
+    this.releaseGeneration++;
+    this.pendingReleaseCount = 0;
+    this.permits.reset();
     this.metricsCollector?.destroy();
     this.metricsCollector = void 0;
     if (this.drainResolve) { this.drainResolve(); this.drainResolve = null; this.drainPromise = null; }
@@ -869,6 +954,8 @@ constructor(count: number, config: SemaphoreConfig = {}) {
         totalAcquired:  this.totalAcquired,
         totalReleased:  this.totalReleased,
         totalTimeouts:  this.totalTimeouts,
+        /** Tasks ejected by the stale-task purge (rejected PURGED after queueMaxAge). Not counted as timeouts. */
+        totalPurged:    this.totalPurged,
         /** Tasks evicted from the queue by a circuit trip (rejected CIRCUIT_OPEN while queued). */
         totalEvictions: this.totalEvictions,
         circuitBreakerCooldownRemaining: this.circuit.cooldownRemaining,

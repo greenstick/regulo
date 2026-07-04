@@ -34,7 +34,7 @@ async function main() {
     // tryAcquire is synchronous; this isolates raw permit + bookkeeping cost.
     const sem = new Semaphore(1_000_000);
     fastPath.push(
-      measureSync('tryAcquire + release', () => {
+      measureSync('tryAcquire + release (with metrics)', () => {
         const release = sem.tryAcquire();
         if (release) release();
       })
@@ -42,7 +42,7 @@ async function main() {
     // tryAcquire with metrics disabled — shows the cost of observability.
     const semNoMetrics = new Semaphore(1_000_000, { metricsEnabled: false });
     fastPath.push(
-      measureSync('tryAcquire + release (no metrics)', () => {
+      measureSync('tryAcquire + release', () => {
         const release = semNoMetrics.tryAcquire();
         if (release) release();
       })

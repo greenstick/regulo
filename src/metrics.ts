@@ -217,6 +217,7 @@ export class SemaphoreMetrics {
   private _totalAcquiredQueued  = 0;
   private _totalReleased        = 0;
   private _totalTimeouts        = 0;
+  private _totalPurged          = 0;
   private _totalAborts          = 0;
   private _capacity             = 0;
   private _circuitOpen          = false;
@@ -276,6 +277,11 @@ export class SemaphoreMetrics {
     this._totalAborts++;
     for (const w of this.windows) w.sampleQueue(now, queueDepth);
   }
+  /** Lifetime counter plus a queue-depth sample — purges, like aborts, never enter the timeout count. */
+  public onPurge(now: number, queueDepth: number): void {
+    this._totalPurged++;
+    for (const w of this.windows) w.sampleQueue(now, queueDepth);
+  }
   public sampleGauges(now: number, inflight: number, queueDepth: number): void {
     for (const w of this.windows) w.sampleBoth(now, inflight, queueDepth);
   }
@@ -322,6 +328,7 @@ export class SemaphoreMetrics {
         totalAcquiredQueued:  this._totalAcquiredQueued,
         totalReleased:        this._totalReleased,
         totalTimeouts:        this._totalTimeouts,
+        totalPurged:          this._totalPurged,
         totalAborts:          this._totalAborts,
         capacity:             this._capacity,
         circuitOpen:          this._circuitOpen,
@@ -333,7 +340,7 @@ export class SemaphoreMetrics {
   public reset(): void {
     for (const w of this.windows) w.reset();
     this._totalAcquiredFast = 0; this._totalAcquiredQueued = 0; this._totalReleased = 0;
-    this._totalTimeouts = 0; this._totalAborts = 0; this._capacity = 0;
+    this._totalTimeouts = 0; this._totalPurged = 0; this._totalAborts = 0; this._capacity = 0;
     this._circuitOpen = false; this._circuitHalfOpen = false;
   }
 

@@ -228,7 +228,7 @@ Feeds an external failure signal (e.g. a downstream error) into the circuit brea
 
 #### `shutdown(reason?): void`
 
-Permanently stops the semaphore — kills the gas. All queued tasks are rejected, the purge interval is cleared, and metrics collection stops (`status().metrics` returns `null` afterwards; the collector's buffers are released). This is terminal: it cannot be reversed, and a later `reset()` on a shut-down instance throws rather than reviving it. Calling `shutdown()` again is a no-op.
+Permanently stops the semaphore — kills the gas. All queued tasks are rejected, the purge interval is cleared, and metrics collection stops (`status().metrics` returns `null` afterwards; the collector's buffers are released). Outstanding release closures are invalidated and the permit pool is settled, so a `release()` arriving after shutdown is a safe no-op and post-shutdown `status()` reads as terminal. This is terminal: it cannot be reversed, and a later `reset()` on a shut-down instance throws rather than reviving it. Calling `shutdown()` again is a no-op.
 
 #### `on(event, listener) / off(event, listener) / removeAllListeners(event?)`
 
@@ -403,6 +403,7 @@ Generated with `status()`.
     totalAcquired: number,
     totalReleased: number,
     totalTimeouts: number,
+    totalPurged: number,       // tasks ejected by the stale-task purge (PURGED); not counted as timeouts
     totalEvictions: number,    // tasks evicted from the queue by a circuit trip
     circuitBreakerCooldownRemaining: number, // ms until circuit may probe
   },
@@ -536,18 +537,18 @@ concurrency, the circuit breakers on per-call overhead.
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `tryAcquire` + `release` | 3.07M | 2.90x slower |
-| `tryAcquire` + `release` (no metrics) | 8.91M | fastest |
-| `use()` round-trip | 1.24M | 7.16x slower |
-| `use()` round-trip (no metrics) | 1.79M | 4.97x slower |
+| `tryAcquire` + `release` (with metrics) | 3.03M | 1.77x slower |
+| `tryAcquire` + `release` | 5.35M | fastest |
+| `use()` round-trip | 1.27M | 4.21x slower |
+| `use()` round-trip (no metrics) | 1.65M | 3.23x slower |
 
 **🎛️ Weighted acquire, uncontended**
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `use()` weight=1 | 1.24M | 1.03x slower |
-| `use()` weight=4 | 1.26M | 1.01x slower |
-| `use()` weight=16 | 1.28M | fastest |
+| `use()` weight=1 | 1.34M | 1.00x slower |
+| `use()` weight=4 | 1.32M | 1.02x slower |
+| `use()` weight=16 | 1.34M | fastest |
 
 Weighted permits add no meaningful overhead regardless of weight — claiming
 16 burners at once costs about the same as claiming one.
@@ -556,18 +557,18 @@ Weighted permits add no meaningful overhead regardless of weight — claiming
 
 | Scenario | tasks/sec | vs. fastest |
 |---|--:|---|
-| concurrency=4 | 843.2k | 1.03x slower |
-| concurrency=16 | 856.6k | 1.02x slower |
-| concurrency=64 | 871.9k | fastest |
-| concurrency=16, random priority | 761.2k | 1.15x slower |
+| concurrency=4 | 762.4k | 1.09x slower |
+| concurrency=16 | 786.1k | 1.06x slower |
+| concurrency=64 | 833.5k | fastest |
+| concurrency=16, random priority | 754.1k | 1.11x slower |
 
 **📈 `status()` snapshot cost**
 
 | Queue depth | ops/sec | vs. fastest |
 |---|--:|---|
-| 0 | 764.8k | fastest |
-| 100 | 754.3k | 1.01x slower |
-| 1000 | 757.0k | 1.01x slower |
+| 0 | 738.2k | 1.02x slower |
+| 100 | 754.3k | fastest |
+| 1000 | 741.4k | 1.02x slower |
 
 `status()` is O(1) in queue depth — the cost is flat across queue depths (within
 run-to-run noise) because queue age is read from an enqueue-ordered index rather
@@ -578,31 +579,31 @@ scrape path for arbitrarily long task queues.
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 4.11M | fastest |
-| p-limit | 1.25M | 3.29x slower |
-| p-queue | 1.25M | 3.30x slower |
-| regulo (no metrics) | 1.72M | 2.40x slower |
-| regulo | 1.24M | 3.33x slower |
+| cockatiel (bulkhead) | 4.06M | fastest |
+| regulo | 1.73M | 2.34x slower |
+| regulo (with metrics) | 1.26M | 3.23x slower |
+| p-limit | 1.19M | 3.40x slower |
+| p-queue | 1.18M | 3.45x slower |
 
 **📊 regulo vs. other libraries — contended throughput @ concurrency=16** (tasks/sec)
 
 | Library | tasks/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 1.70M | fastest |
-| p-queue | 1.03M | 1.65x slower |
-| regulo (no metrics) | 1.04M | 1.64x slower |
-| p-limit | 903.5k | 1.89x slower |
-| regulo | 836.6k | 2.04x slower |
+| cockatiel (bulkhead) | 1.56M | fastest |
+| p-queue | 1.06M | 1.47x slower |
+| regulo | 927.1k | 1.68x slower |
+| p-limit | 903.5k | 1.72x slower |
+| regulo (with metrics) | 686.6k | 2.27x slower |
 
 **🛡️ Circuit breaker overhead — closed/healthy circuit**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| regulo `ManualCircuitBreaker` | 5.06M | fastest |
-| regulo `NoopCircuitBreaker` | 4.72M | 1.07x slower |
-| regulo `SaturationCircuitBreaker` | 3.85M | 1.31x slower |
-| cockatiel (circuitBreaker) | 2.80M | 1.81x slower |
-| opossum | 1.53M | 3.31x slower |
+| regulo `ManualCircuitBreaker` | 5.10M | fastest |
+| regulo `NoopCircuitBreaker` | 4.66M | 1.09x slower |
+| regulo `SaturationCircuitBreaker` | 3.25M | 1.57x slower |
+| cockatiel (circuitBreaker) | 2.65M | 1.93x slower |
+| opossum | 1.54M | 3.31x slower |
 
 The picture is consistent. Cockatiel's bulkhead is the fastest limiter — and
 **Regulo** trades raw limiter throughput for an integrated priority heap, weighted
@@ -620,7 +621,7 @@ rolling window on every call.
 
 In practice none of this is the bottleneck. **Regulo** guards work that is *far*
 more expensive than the limiter itself: SSR renders, database queries,
-downstream API calls, measured in milliseconds. Even at ~670k tasks/sec
+downstream API calls, measured in milliseconds. Even at ~690k tasks/sec
 under contention the per-task overhead is a few microseconds against operations
 thousands of times slower. If you only need a bare concurrency cap on cheap
 work in a hot loop, reach for a leaner limiter; see [Feature comparison](#feature-comparison).
@@ -632,18 +633,30 @@ npx vitest run --coverage
 ```
 
 ```
- ✓ test/queue.test.ts (7 tests)
- ✓ test/metrics.test.ts (18 tests)
- ✓ test/breaker.test.ts (21 tests)
- ✓ test/permit.test.ts (14 tests)
- ✓ test/backoff.test.ts (6 tests)
+ ✓ test/queue.test.ts (9 tests)
  ✓ test/ordering.test.ts (13 tests)
- ✓ test/heap.test.ts (9 tests)
- ✓ test/list.test.ts (8 tests)
- ✓ test/semaphore.test.ts (110 tests)
+ ✓ test/validation.test.ts (5 tests)
+ ✓ test/metrics.test.ts (22 tests)
+ ✓ test/permit.test.ts (17 tests)
+ ✓ test/backoff.test.ts (8 tests)
+ ✓ test/heap.test.ts (10 tests)
+ ✓ test/list.test.ts (9 tests)
+ ✓ test/breaker.test.ts (23 tests)
+ ✓ test/breakers-passthrough.test.ts (4 tests)
+ ✓ test/semaphore-edges.test.ts (29 tests)
+ ✓ test/semaphore.test.ts (111 tests)
 
- Test Files  9 passed (9)
-      Tests  206 passed (206)
+ Test Files  12 passed (12)
+      Tests  260 passed (260)
+```
+
+```
+ % Coverage report from v8
+----------------|---------|----------|---------|---------|
+File            | % Stmts | % Branch | % Funcs | % Lines |
+----------------|---------|----------|---------|---------|
+All files       |    99.6 |    97.84 |     100 |     100 |
+----------------|---------|----------|---------|---------|
 ```
 
 ## Caveats

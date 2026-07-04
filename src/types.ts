@@ -155,8 +155,8 @@ export interface CircuitBreakerStrategy {
   readonly cooldownRemaining: number;
   /** open → half-open when ready; true if the transition just occurred. */
   checkAndTransition(): boolean;
-  /** Record one admission attempt (called per acquire while relevant). */
-  trackAttempt(): void;
+  /** Record one admission attempt. Called once per actual admission — a granted fast-path acquire (including tryAcquire) or a task enqueued — never for rejected admissions (QUEUE_FULL, null tryAcquire). `now` (epoch ms) is passed when the caller has already read the clock for this admission; read Date.now() yourself if absent and needed. */
+  trackAttempt(now?: number): void;
   /** Record one failure signal (queue timeout, or Semaphore.reportFailure()). */
   recordFailure(): void;
   /** Evaluate the trip condition; report trip data if the circuit just opened. */
@@ -275,6 +275,7 @@ export interface SemaphoreMetricsSnapshot {
     totalAcquiredQueued:  number;
     totalReleased:        number;
     totalTimeouts:        number;
+    totalPurged:          number;
     totalAborts:          number;
     capacity:             number;
     circuitOpen:          boolean;

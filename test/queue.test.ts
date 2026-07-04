@@ -80,3 +80,27 @@ describe('QueuedTask', () => {
     expect(onAbort).not.toHaveBeenCalled();
   });
 });
+
+describe('QueuedTask defaults and late abort', () => {
+  it('defaults weight to 1 when not provided', () => {
+    const { task } = makeTask(1);
+    expect(task.weight).toBe(1);
+  });
+
+  it('ignores an abort listener that fires after the task was claimed', () => {
+    // Fake signal that captures the listener but never removes it, so we can
+    // invoke it after dispatch has already won claim() — the listener's
+    // claim() must return false and onAbort must not run.
+    let captured: (() => void) | undefined;
+    const fakeSignal = {
+      addEventListener: (_: string, l: () => void) => { captured = l; },
+      removeEventListener: () => {},
+    } as unknown as AbortSignal;
+    const { task } = makeTask(1, { abortSignal: fakeSignal });
+    const onAbort = vi.fn();
+    task.arm(onAbort);
+    expect(task.dispatch(() => () => {})).toBe(true);
+    captured!();
+    expect(onAbort).not.toHaveBeenCalled();
+  });
+});

@@ -159,3 +159,52 @@ describe('SemaphoreMetrics', () => {
     });
   });
 });
+
+describe('SemaphoreMetrics window labels and granular samplers', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('labels sub-minute windows in seconds and sub-second windows in ms', () => {
+    const secs = new SemaphoreMetrics([{ size: 30, stepMs: 1000 }]);
+    expect(secs.primaryLabel).toBe('30s');
+    const ms = new SemaphoreMetrics([{ size: 3, stepMs: 100 }]);
+    expect(ms.primaryLabel).toBe('300ms');
+  });
+
+  it('sampleQueueDepth records a queue gauge sample in every window', () => {
+    const m = new SemaphoreMetrics(DEFAULT_WINDOW_OPTIONS);
+    m.sampleQueueDepth(7);
+    const snap = m.getSnapshot();
+    expect(snap.windows['1m']!.queue.samples).toBe(1);
+    expect(snap.windows['1m']!.queue.max).toBe(7);
+  });
+
+  it('keeps in-bucket counts when the clock steps backwards into an already-written bucket', () => {
+    const m = new SemaphoreMetrics([{ size: 60, stepMs: 1000 }]);
+    m.markAcquireFast();                       // bucket N
+    vi.advanceTimersByTime(1000);
+    m.markAcquireFast();                       // bucket N+1 (cache now points here)
+    vi.setSystemTime(Date.now() - 1000);
+    m.markAcquireFast();                       // back in bucket N: must add, not clear
+    vi.setSystemTime(Date.now() + 1000);
+    expect(m.getSnapshot().windows['1m']!.counts.acquired).toBe(3);
+  });
+});
+
+describe('SemaphoreMetrics purge accounting', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('onPurge counts lifetime purges and samples queue depth, never timeouts', () => {
+    const m = new SemaphoreMetrics(DEFAULT_WINDOW_OPTIONS);
+    m.onPurge(Date.now(), 3);
+    m.onPurge(Date.now(), 1);
+    const snap = m.getSnapshot();
+    expect(snap.meta.totalPurged).toBe(2);
+    expect(snap.meta.totalTimeouts).toBe(0);
+    expect(snap.windows['1m']!.counts.timeouts).toBe(0);
+    expect(snap.windows['1m']!.queue.samples).toBe(2);
+    m.reset();
+    expect(m.getSnapshot().meta.totalPurged).toBe(0);
+  });
+});

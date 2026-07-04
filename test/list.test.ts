@@ -104,3 +104,15 @@ describe('IntrusiveList', () => {
     expect(list.size).toBe(1);
   });
 });
+
+describe('IntrusiveList.peekHead', () => {
+  it('returns undefined on an empty list and the head otherwise', () => {
+    const list = new IntrusiveList<Node>();
+    expect(list.peekHead()).toBeUndefined();
+    const a = new Node(1);
+    list.pushTail(a);
+    expect(list.peekHead()).toBe(a);
+    list.remove(a);
+    expect(list.peekHead()).toBeUndefined();
+  });
+});

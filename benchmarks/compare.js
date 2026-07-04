@@ -48,8 +48,8 @@ async function main() {
     const queue = new PQueue({ concurrency: 1_000_000 });
     const ckBulk = bulkhead(1_000_000);
 
-    uncontended.push(await measure('regulo', () => sem.use(asyncNoop)));
-    uncontended.push(await measure('regulo (no metrics)', () => semNm.use(asyncNoop)));
+    uncontended.push(await measure('regulo (with metrics)', () => sem.use(asyncNoop)));
+    uncontended.push(await measure('regulo', () => semNm.use(asyncNoop)));
     uncontended.push(await measure('p-limit', () => limit(asyncNoop)));
     uncontended.push(await measure('p-queue', () => queue.add(asyncNoop)));
     uncontended.push(await measure('cockatiel (bulkhead)', () => ckBulk.execute(asyncNoop)));
@@ -75,8 +75,8 @@ async function main() {
     // queue must be deep enough to hold a full batch rather than reject it.
     const ckBulk = bulkhead(CONCURRENCY, BATCH * 2);
 
-    contended.push(withScale(await measure('regulo', () => batch(() => sem.use(asyncNoop), BATCH), { durationMs: 600 })));
-    contended.push(withScale(await measure('regulo (no metrics)', () => batch(() => semNm.use(asyncNoop), BATCH), { durationMs: 600 })));
+    contended.push(withScale(await measure('regulo (with metrics)', () => batch(() => sem.use(asyncNoop), BATCH), { durationMs: 600 })));
+    contended.push(withScale(await measure('regulo', () => batch(() => semNm.use(asyncNoop), BATCH), { durationMs: 600 })));
     contended.push(withScale(await measure('p-limit', () => batch(() => limit(asyncNoop), BATCH), { durationMs: 600 })));
     contended.push(withScale(await measure('p-queue', () => batch(() => queue.add(asyncNoop), BATCH), { durationMs: 600 })));
     contended.push(withScale(await measure('cockatiel (bulkhead)', () => batch(() => ckBulk.execute(asyncNoop), BATCH), { durationMs: 600 })));

@@ -1,6 +1,6 @@
 {
   "name": "regulo",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "description": "Control the heat — a priority-queue semaphore with weighted permits, a saturation circuit breaker, adaptive backoff, and built-in metrics. Zero dependencies.",
   "license": "MIT",
   "author": "Greenstick <benacordier@gmail.com>",

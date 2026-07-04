@@ -99,3 +99,21 @@ describe('IndexedBinaryHeap', () => {
     expect(results).toEqual([1, 2, 3, 5, 8]);
   });
 });
+
+describe('IndexedBinaryHeap.has', () => {
+  it('reports membership before and after removal', () => {
+    const h = new IndexedBinaryHeap<Node>(byPriority);
+    const a = node(1, 1);
+    const b = node(2, 2);
+    expect(h.has(a)).toBe(false);
+    h.insert(a);
+    h.insert(b);
+    expect(h.has(a)).toBe(true);
+    expect(h.has(b)).toBe(true);
+    h.pop();
+    expect(h.has(a)).toBe(false);
+    expect(h.has(b)).toBe(true);
+    h.delete(b);
+    expect(h.has(b)).toBe(false);
+  });
+});

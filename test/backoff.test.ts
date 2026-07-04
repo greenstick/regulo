@@ -45,3 +45,17 @@ describe('BackoffTracker', () => {
     expect(b.currentDelay).toBe(0);
   });
 });
+
+describe('BackoffTracker config validation', () => {
+  it('rejects a decayFactor of exactly 1 (exclusive upper bound)', () => {
+    expect(() => new BackoffTracker({ decayFactor: 1 })).toThrow(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+    );
+  });
+
+  it('rejects a decayFactor of exactly 0 (exclusive lower bound)', () => {
+    expect(() => new BackoffTracker({ decayFactor: 0 })).toThrow(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+    );
+  });
+});

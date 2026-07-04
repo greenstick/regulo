@@ -51,8 +51,7 @@ class CircuitBreakerEventWindow {
     this.timestamps = new Float64Array(size);
   }
 
-  private idx(): number {
-    const now = Date.now();
+  private idx(now: number): number {
     if (now < this.cachedUntil && now >= this.cachedUntil - this.stepMs) return this.cachedIndex;
     const ts = Math.floor(now / this.stepMs) * this.stepMs;
     const i = Math.floor(ts / this.stepMs) % this.size;
@@ -66,8 +65,8 @@ class CircuitBreakerEventWindow {
     return i;
   }
 
-  public addAcquired(): void { this.buckets[this.idx() * 2]++; }
-  public addTimeout(): void  { this.buckets[this.idx() * 2 + 1]++; }
+  public addAcquired(now = Date.now()): void { this.buckets[this.idx(now) * 2]++; }
+  public addTimeout(): void  { this.buckets[this.idx(Date.now()) * 2 + 1]++; }
 
   public snapshot(): { acquired: number; timeouts: number } {
     const now = Date.now();
@@ -155,9 +154,13 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
   /**
    * Records an attempt. Skipped during open/half-open so only closed-circuit
    * traffic counts toward the failure rate.
+   *
+   * Accepts an optional caller-supplied timestamp so a caller that has
+   * already read the clock for the same admission (the semaphore's metrics
+   * path) doesn't pay a second Date.now() on the hot path.
    */
-  public trackAttempt(): void {
-    if (this.state === 'closed') this.eventWindow.addAcquired();
+  public trackAttempt(now?: number): void {
+    if (this.state === 'closed') this.eventWindow.addAcquired(now);
   }
 
   /** Records a failure unconditionally (used for probe timeouts too). */

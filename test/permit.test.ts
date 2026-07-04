@@ -123,3 +123,35 @@ describe('PermitPool', () => {
     });
   });
 });
+
+describe('assertInvariant', () => {
+  it('logs an error when the invariant is violated in debug mode', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const p = new PermitPool(2);
+    // The public mutators preserve the invariant by construction (clamps are
+    // symmetric), so force a violation directly to exercise the check.
+    (p as unknown as { _inFlight: number })._inFlight = 5;
+    p.assertInvariant(true);
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy.mock.calls[0]![0]).toContain('Invariant violation');
+    spy.mockRestore();
+  });
+
+  it('is silent when debug is off, even on violation', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const p = new PermitPool(2);
+    (p as unknown as { _inFlight: number })._inFlight = 5;
+    p.assertInvariant(false);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('is silent in debug mode when the invariant holds', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const p = new PermitPool(2);
+    p.acquire(1);
+    p.assertInvariant(true);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});
