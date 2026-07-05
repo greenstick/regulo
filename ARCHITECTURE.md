@@ -229,7 +229,7 @@ The breaker is a three-state machine: **Closed**, **Open**, and **Probing**.
 ```
                     +---------------------------+
                     |          CLOSED           | <=====================+
-                    |     (normal dispatch)      |                      |
+                    |     normal dispatch       |                       |
                     +---------------------------+                       |
                                  |                                      |
                                  | timeout rate exceeds                 |
@@ -238,19 +238,19 @@ The breaker is a three-state machine: **Closed**, **Open**, and **Probing**.
                                  |  minFailures guards met)             |
                                  v                                      |
                     +---------------------------+                       |
-                    |           OPEN             |                      |
-                    |  (reject every acquire      |                     |
-                    |   immediately)              |                     |
+                    |           OPEN            |                       |
+                    |     reject every          |                       |
+                    |     acquire immediately   |                       |
                     +---------------------------+                       |
                                  |                                      |
                                  | circuitBreakerCooldown elapses       |
                                  v                                      |
                     +---------------------------+                       |
                     |          PROBING          | ----------------------+
-                    |  (exactly one canary      |
-                    |   request admitted; every |
-                    |   other acquire still     | -- probe fails or ----+
-                    |   rejected)               |    times out          |
+                    |     exactly one canary    |
+                    |     request admitted;     |
+                    |     every other acquire   | -- probe fails or ----+
+                    |     still rejected        |    times out          |
                     +---------------------------+                       |
                                  ^                                      |
                                  |                                      |
