@@ -1,7 +1,7 @@
 # Regulo v1.4.0 — Architecture, Correctness, and Complexity Audit
 
-**Subject:** `regulo`, a priority-queue semaphore with an integrated circuit breaker
-**Version audited:** 1.4.0
+**Subject:** `regulo`, a priority-queue semaphore with an integrated circuit breaker<br/> 
+**Version audited:** 1.4.0<br/>
 **Scope:** full source tree (`src/`), test suite (`test/`), build configuration, and published documentation (`README.md`, `CHANGELOG.md`)
 
 ## How this report was produced
@@ -65,7 +65,7 @@ The zero-runtime-dependency design means there is no transitive dependency tree 
 
 One clarification worth making precisely, since it's easy to conflate two different kinds of "compatibility": shipping **both ESM and CJS** output is about *module-format* compatibility — it lets a project still using `require()`, or a bundler that doesn't fully understand ESM, consume the package without extra configuration. It says nothing about which *Node.js versions* are supported. That's a separate axis, and on that axis Regulo requires a comparatively recent runtime (Node ≥ 20, released April 2023) — a currently well-supported floor, not "legacy" support. The `engines` field enforces this at install time via package managers that respect it; nothing in the build silently downlevels the output to run on older Node.
 
-### 2.2 Package size (measured, not quoted)
+### 2.2 Package size
 
 The README states the published bundle is "a single ~34 KB file." A clean rebuild from this audit's copy of the source confirms that figure directly, measured as raw byte counts (KB below is decimal, bytes ÷ 1000) rather than quoted from `tsup`'s own console output:
 
@@ -230,29 +230,30 @@ The breaker is a three-state machine: **Closed**, **Open**, and **Probing**.
                     +---------------------------+
                     |          CLOSED           | <=====================+
                     |     (normal dispatch)      |                      |
-                    +---------------------------+                      |
+                    +---------------------------+                       |
                                  |                                      |
                                  | timeout rate exceeds                 |
                                  | circuitBreakerThreshold              | probe
                                  | (with minThroughput/                 | succeeds
                                  |  minFailures guards met)             |
                                  v                                      |
-                    +---------------------------+                      |
+                    +---------------------------+                       |
                     |           OPEN             |                      |
-                    |  (reject every acquire      |                      |
-                    |   immediately)              |                      |
-                    +---------------------------+                      |
+                    |  (reject every acquire      |                     |
+                    |   immediately)              |                     |
+                    +---------------------------+                       |
                                  |                                      |
                                  | circuitBreakerCooldown elapses       |
                                  v                                      |
-                    +---------------------------+                      |
-                    |          PROBING           | ---------------------+
-                    |  (exactly one canary        |
-                    |   request admitted; every    |
-                    |   other acquire still        | -- probe fails
-                    |   rejected)                  |    or times out
-                    +---------------------------+
+                    +---------------------------+                       |
+                    |          PROBING          | ----------------------+
+                    |  (exactly one canary      |
+                    |   request admitted; every |
+                    |   other acquire still     | -- probe fails or ----+
+                    |   rejected)               |    times out          |
+                    +---------------------------+                       |
                                  ^                                      |
+                                 |                                      |
                                  +--------------------------------------+
                                          (restarts the full cooldown)
 ```
