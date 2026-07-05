@@ -435,16 +435,16 @@ describe('Semaphore', () => {
       releases.forEach(r => r());
     });
 
-    it('transitions to half-open after cooldown', async () => {
+    it('transitions to probing after cooldown', async () => {
       const sem = make(2, cbConfig);
       await tripCircuit(sem);
       vi.advanceTimersByTime(2000);
-      const halfOpenEmit = vi.fn();
-      sem.on(SemaphoreEvents.CIRCUITHALFOPEN, halfOpenEmit);
-      // tryAcquire calls checkAndTransition → emits CIRCUITHALFOPEN, then claims probe
+      const probingEmit = vi.fn();
+      sem.on(SemaphoreEvents.CIRCUITPROBING, probingEmit);
+      // tryAcquire calls checkAndTransition → emits CIRCUITPROBING, then claims probe
       const probe = sem.tryAcquire();
-      expect(sem.status().status.circuitHalfOpen).toBe(true);
-      expect(halfOpenEmit).toHaveBeenCalledOnce();
+      expect(sem.status().status.circuitProbing).toBe(true);
+      expect(probingEmit).toHaveBeenCalledOnce();
       probe!();
     });
 
@@ -454,12 +454,12 @@ describe('Semaphore', () => {
       vi.advanceTimersByTime(2000);
       const closeEmit = vi.fn();
       sem.on(SemaphoreEvents.CIRCUITCLOSE, closeEmit);
-      // tryAcquire → half-open → probe slot claimed
+      // tryAcquire → probing → probe slot claimed
       const probe = sem.tryAcquire()!;
-      expect(sem.status().status.circuitHalfOpen).toBe(true);
+      expect(sem.status().status.circuitProbing).toBe(true);
       probe(); // release → handleProbeSuccess → circuit closes
       expect(sem.status().status.circuitOpen).toBe(false);
-      expect(sem.status().status.circuitHalfOpen).toBe(false);
+      expect(sem.status().status.circuitProbing).toBe(false);
       expect(closeEmit).toHaveBeenCalledOnce();
     });
 
@@ -470,18 +470,18 @@ describe('Semaphore', () => {
       const sem = make(2, cbConfig);
       await tripCircuit(sem);
       vi.advanceTimersByTime(2000);
-      sem.tryAcquire(); // triggers half-open, claims probe slot
-      expect(sem.status().status.circuitHalfOpen).toBe(true);
+      sem.tryAcquire(); // triggers probing, claims probe slot
+      expect(sem.status().status.circuitProbing).toBe(true);
       // Simulate probe timeout: call handleProbeFailure directly
       (sem as any).circuit.handleProbeFailure();
       expect((sem as any).circuit.isOpen).toBe(true);
-      expect((sem as any).circuit.isHalfOpen).toBe(false);
+      expect((sem as any).circuit.isProbing).toBe(false);
     });
 
-    it('a queued probe timing out re-opens the circuit (half-open → open, public API)', async () => {
+    it('a queued probe timing out re-opens the circuit (probing → open, public API)', async () => {
       const sem = make(1, cbConfig);
       // Hold the only permit with a task acquired while the circuit is closed, so
-      // capacity stays full through the open period and into half-open. This is
+      // capacity stays full through the open period and into probing. This is
       // what forces the probe to *queue* (with a watchdog) rather than take the
       // fast path — the only route that exercises the probe-timeout reopen.
       const held = await sem.acquire();
@@ -491,38 +491,38 @@ describe('Semaphore', () => {
       expect(sem.status().status.circuitOpen).toBe(true);
 
       vi.advanceTimersByTime(2000); // elapse cooldown
-      const onHalfOpen = vi.fn();
+      const onProbing = vi.fn();
       const onOpen = vi.fn();
-      sem.on(SemaphoreEvents.CIRCUITHALFOPEN, onHalfOpen);
+      sem.on(SemaphoreEvents.CIRCUITPROBING, onProbing);
       sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
 
-      // First acquire after cooldown: transitions to half-open (the acquire()
+      // First acquire after cooldown: transitions to probing (the acquire()
       // path, not tryAcquire), then enqueues a queued probe since no permit is free.
       const probe = sem.acquire();
-      expect(onHalfOpen).toHaveBeenCalledTimes(1);
-      expect(sem.status().status.circuitHalfOpen).toBe(true);
+      expect(onProbing).toHaveBeenCalledTimes(1);
+      expect(sem.status().status.circuitProbing).toBe(true);
 
       // Probe's watchdog fires while the permit is still held → probe times out.
       vi.advanceTimersByTime(50);
       await expect(probe).rejects.toMatchObject({ code: 'TIMEOUT' });
 
       expect(sem.status().status.circuitOpen).toBe(true);
-      expect(sem.status().status.circuitHalfOpen).toBe(false);
-      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'half-open-probe-failed' }));
+      expect(sem.status().status.circuitProbing).toBe(false);
+      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'probe-failed' }));
 
       held();
     });
 
-    it('rejects with CIRCUIT_HALF_OPEN when probe in flight', async () => {
+    it('rejects with CIRCUIT_PROBING when probe in flight', async () => {
       const sem = make(2, cbConfig);
       await tripCircuit(sem);
       vi.advanceTimersByTime(2000);
-      // tryAcquire: checkAndTransition → half-open, then probe slot claimed
+      // tryAcquire: checkAndTransition → probing, then probe slot claimed
       const probeRelease = sem.tryAcquire();
-      expect(sem.status().status.circuitHalfOpen).toBe(true);
+      expect(sem.status().status.circuitProbing).toBe(true);
       expect(probeRelease).not.toBeNull();
       // Probe is in flight — next acquire must reject
-      await expect(sem.acquire()).rejects.toMatchObject({ code: 'CIRCUIT_HALF_OPEN' });
+      await expect(sem.acquire()).rejects.toMatchObject({ code: 'CIRCUIT_PROBING' });
       probeRelease!();
     });
   });
@@ -621,7 +621,7 @@ describe('Semaphore', () => {
       sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
       await expect(sem.use(async () => { throw new Error('downstream-5xx'); })).rejects.toThrow();
       expect(sem.circuitState).toBe('open');
-      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'half-open-probe-failed' }));
+      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'probe-failed' }));
       expect(sem.availablePermits).toBe(1); // probe permit was still released
 
       // A probe rejecting with a NON-matching error still closes the circuit.

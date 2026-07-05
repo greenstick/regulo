@@ -86,12 +86,12 @@ describe('Semaphore edge paths', () => {
       r();
     });
 
-    it('logs half-open transitions from tryAcquire and acquire, and probe close', async () => {
+    it('logs probing transitions from tryAcquire and acquire, and probe close', async () => {
       const sem = make(1, { ...instantTripConfig, debug: true });
       await tripViaReportFailure(sem);
       vi.advanceTimersByTime(1000);
-      const probe = sem.tryAcquire()!; // open → half-open via tryAcquire
-      expect(logged('entering half-open')).toBe(true);
+      const probe = sem.tryAcquire()!; // open → probing via tryAcquire
+      expect(logged('entering probing')).toBe(true);
       probe(); // probe success → close
       expect(logged('Circuit closed after successful probe')).toBe(true);
 
@@ -100,8 +100,8 @@ describe('Semaphore edge paths', () => {
       infoSpy.mockClear();
       const events: boolean[] = [];
       sem.on(SemaphoreEvents.TASKACQUIRE, p => events.push(p.probe === true));
-      const release = await sem.acquire(); // open → half-open via acquire; probe fast path
-      expect(logged('entering half-open')).toBe(true);
+      const release = await sem.acquire(); // open → probing via acquire; probe fast path
+      expect(logged('entering probing')).toBe(true);
       expect(events).toEqual([true]); // TASKACQUIRE carries probe: true
       release();
       expect(sem.status().status.circuitOpen).toBe(false);
@@ -141,7 +141,7 @@ describe('Semaphore edge paths', () => {
       expect(logged('Shutdown: bye')).toBe(true);
     });
 
-    it('logs when a half-open probe operation fails through use()', async () => {
+    it('logs when a probe operation fails through use()', async () => {
       const sem = make(1, {
         ...instantTripConfig, debug: true,
         circuitBreakerFailurePredicate: (e) => e instanceof Error && e.message === 'downstream',
@@ -150,7 +150,7 @@ describe('Semaphore edge paths', () => {
       vi.advanceTimersByTime(1000);
       const result = await sem.use(() => Promise.reject(new Error('downstream'))).catch(e => e.message);
       expect(result).toBe('downstream');
-      expect(warned('half-open probe operation failed')).toBe(true);
+      expect(warned('probe operation failed')).toBe(true);
       expect(sem.status().status.circuitOpen).toBe(true);
     });
   });
@@ -176,14 +176,14 @@ describe('Semaphore edge paths', () => {
       sem.shutdown(); // destroy with no metrics collector
     });
 
-    it('grants and closes a half-open probe without a metrics collector', async () => {
+    it('grants and closes a probe without a metrics collector', async () => {
       const sem = make(1, { ...instantTripConfig, metricsEnabled: false });
       await tripViaReportFailure(sem);
       vi.advanceTimersByTime(1000);
-      const probeRelease = await sem.acquire(); // half-open probe via the fast path
+      const probeRelease = await sem.acquire(); // probe via the fast path
       probeRelease();
       expect(sem.status().status.circuitOpen).toBe(false);
-      expect(sem.status().status.circuitHalfOpen).toBe(false);
+      expect(sem.status().status.circuitProbing).toBe(false);
     });
   });
 
@@ -223,14 +223,14 @@ describe('Semaphore edge paths', () => {
 
   // ─── Queued circuit-breaker probes ─────────────────────────────────────────
   // A probe queues (rather than taking the fast path) when the circuit goes
-  // half-open while every permit is still held.
-  describe('queued half-open probes', () => {
+  // probing while every permit is still held.
+  describe('queued probes', () => {
     async function queueProbe(sem: Semaphore) {
       const [release] = await fillPermits(sem, 1);
       sem.reportFailure(); // trips: circuit open while the permit is held
       expect(sem.status().status.circuitOpen).toBe(true);
       vi.advanceTimersByTime(1000); // cooldown elapses
-      const probePromise = sem.acquire(); // half-open, no capacity → queued probe
+      const probePromise = sem.acquire(); // probing, no capacity → queued probe
       expect(sem.queueLength).toBe(1);
       expect(sem.peekQueue()[0]!.isProbe).toBe(true);
       return { release, probePromise };
@@ -246,7 +246,7 @@ describe('Semaphore edge paths', () => {
       expect(probeFlags).toEqual([true]);
       probeRelease();
       expect(sem.status().status.circuitOpen).toBe(false);
-      expect(sem.status().status.circuitHalfOpen).toBe(false);
+      expect(sem.status().status.circuitProbing).toBe(false);
     });
 
     it('releases the probe slot when a queued probe is aborted', async () => {
@@ -299,8 +299,8 @@ describe('Semaphore edge paths', () => {
       sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
       vi.advanceTimersByTime(100);
       expect(await rejected).toBe('TIMEOUT');
-      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'half-open-probe-failed' }));
-      expect(warned('half-open probe timed out')).toBe(true);
+      expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'probe-failed' }));
+      expect(warned('probe timed out')).toBe(true);
       expect(sem.status().status.circuitOpen).toBe(true);
       release();
     });
@@ -343,14 +343,14 @@ describe('Semaphore edge paths', () => {
       await expect(queued).rejects.toMatchObject({ code: 'CANCELLED' });
     });
 
-    it('does not dispatch a non-probe head while half-open (stub breaker)', async () => {
-      // Contract-level stub: half-open with a probe id that never matches the
-      // queued head, so the scheduler's half-open guard must hold the queue.
-      let halfOpen = false;
+    it('does not dispatch a non-probe head while probing (stub breaker)', async () => {
+      // Contract-level stub: probing with a probe id that never matches the
+      // queued head, so the scheduler's probing guard must hold the queue.
+      let probing = false;
       const stub: CircuitBreakerStrategy = {
-        get state(): CircuitState { return halfOpen ? 'half-open' : 'closed'; },
+        get state(): CircuitState { return probing ? 'probing' : 'closed'; },
         get isOpen() { return false; },
-        get isHalfOpen() { return halfOpen; },
+        get isProbing() { return probing; },
         hasProbeInFlight: false,
         probeTaskId: 999,
         cooldownRemaining: 0,
@@ -363,13 +363,64 @@ describe('Semaphore edge paths', () => {
       const sem = make(1, { circuitBreaker: stub });
       const r = await sem.acquire();
       const queued = sem.acquire();
-      halfOpen = true;
+      probing = true;
       r();
       await vi.advanceTimersByTimeAsync(0);
       expect(sem.queueLength).toBe(1); // held: head id !== probeTaskId
-      halfOpen = false;
+      probing = false;
       sem.cancel();
       await expect(queued).rejects.toMatchObject({ code: 'CANCELLED' });
+    });
+
+    it('evicts a queued non-probe task but preserves a queued probe (stub breaker, defensive fallback)', async () => {
+      // Contract-level stub: an ordinary task is already queued when a
+      // non-compliant breaker transitions straight to probing and queues a
+      // probe behind it without evicting first. Unreachable through the
+      // built-in breaker — evaluateAndTrip() only trips (and evicts) from
+      // closed, and a probe only exists while probing, so an ordinary task
+      // can never still be queued by the time a probe joins it — but
+      // _evictQueueOnCircuitOpen()'s selective fallback still needs to be
+      // exercised against a strategy that violates that contract.
+      //
+      // Note: a second live `acquire()` can't be used to queue the ordinary
+      // task *after* the probe exists — `_acquire()` rejects any call with
+      // CIRCUIT_PROBING once `isProbing && hasProbeInFlight`, before it would
+      // ever reach the queue. So the ordinary task is queued first, while
+      // still "closed", and probing begins only afterward.
+      let probing = false;
+      let hasProbe = false;
+      let probeId: number | null = null;
+      const stub: CircuitBreakerStrategy = {
+        get state(): CircuitState { return probing ? 'probing' : 'closed'; },
+        get isOpen() { return false; },
+        get isProbing() { return probing; },
+        get hasProbeInFlight() { return hasProbe; },
+        get probeTaskId() { return probeId; },
+        cooldownRemaining: 0,
+        checkAndTransition: () => false,
+        trackAttempt() {}, recordFailure() {},
+        evaluateAndTrip: (): CircuitTripResult => ({ tripped: true, timeoutRate: 1, failures: 1, attempts: 1 }),
+        markProbeInFlight() { hasProbe = true; },
+        claimProbeSlot(taskId: number) { hasProbe = true; probeId = taskId; },
+        releaseProbeSlot() { hasProbe = false; probeId = null; },
+        handleProbeSuccess() {}, handleProbeFailure() {}, reset() {},
+      };
+      const sem = make(1, { circuitBreaker: stub });
+      const held = await sem.acquire();  // fast-path grant while closed; capacity now exhausted
+      const other = sem.acquire();       // still closed, no capacity → queues as an ordinary task
+      probing = true;                    // non-compliant closed → probing transition, no eviction
+      const probe = sem.acquire();       // no capacity, isProbing, no probe in flight yet → queues as the probe
+      expect(sem.queueLength).toBe(2);
+
+      sem.reportFailure(); // evaluateAndTrip() → tripped: true → _evictQueueOnCircuitOpen()
+
+      await expect(other).rejects.toMatchObject({ code: 'CIRCUIT_OPEN' });
+      expect(sem.queueLength).toBe(1); // the probe survives, still queued
+      expect(sem.peekQueue()[0]!.isProbe).toBe(true);
+
+      sem.cancel();
+      await expect(probe).rejects.toMatchObject({ code: 'CANCELLED' });
+      held();
     });
 
     it('catches and logs a scheduler exception (Error and non-Error)', async () => {
@@ -378,7 +429,7 @@ describe('Semaphore edge paths', () => {
         const stub: CircuitBreakerStrategy = {
           state: 'closed',
           get isOpen(): boolean { if (armed) throw thrown; return false; },
-          isHalfOpen: false, hasProbeInFlight: false, probeTaskId: null, cooldownRemaining: 0,
+          isProbing: false, hasProbeInFlight: false, probeTaskId: null, cooldownRemaining: 0,
           checkAndTransition: () => false,
           trackAttempt() {}, recordFailure() {},
           evaluateAndTrip: (): CircuitTripResult => ({ tripped: false }),

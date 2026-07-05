@@ -34,7 +34,6 @@ export class IndexedBinaryHeap<T extends HeapNode> {
   public get size(): number { return this.heap.length; }
   public isEmpty(): boolean { return this.heap.length === 0; }
   public peek(): T | undefined { return this.heap[0]; }
-  public toArray(): T[] { return [...this.heap]; }
 
   /** True if `item` is currently in this heap. O(1). */
   public has(item: T): boolean {

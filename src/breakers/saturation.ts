@@ -10,12 +10,12 @@ breaker.
 
 Transitions
   closed → open       Failure rate crosses threshold (with min-count guards).
-  open → half-open    Cooldown elapses; detected on the next acquire() call.
-  half-open → closed  Probe request completes successfully.
-  half-open → open    Probe request fails; full cooldown restarts.
+  open → probing    Cooldown elapses; detected on the next acquire() call.
+  probing → closed  Probe request completes successfully.
+  probing → open    Probe request fails; full cooldown restarts.
 
 Transitions are demand-driven: checkAndTransition() is called at the top of
-every acquire() so open → half-open fires on the first request after cooldown,
+every acquire() so open → probing fires on the first request after cooldown,
 not on a background timer.
 
 State transitions are surfaced as return values so the caller (Semaphore) can
@@ -146,13 +146,13 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
   // Getters
   public get isClosed(): boolean  { return this.state === 'closed'; }
   public get isOpen(): boolean    { return this.state === 'open'; }
-  public get isHalfOpen(): boolean { return this.state === 'half-open'; }
+  public get isProbing(): boolean { return this.state === 'probing'; }
   public get hasProbeInFlight(): boolean { return this.probeInFlight; }
   public get probeTaskId(): number | null { return this._probeTaskId; }
   public get cooldownRemaining(): number { return this.isOpen ? Math.max(0, this.openUntil - Date.now()) : 0; }
 
   /**
-   * Records an attempt. Skipped during open/half-open so only closed-circuit
+   * Records an attempt. Skipped during open/probing so only closed-circuit
    * traffic counts toward the failure rate.
    *
    * Accepts an optional caller-supplied timestamp so a caller that has
@@ -169,13 +169,13 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
   }
 
   /**
-   * open → half-open if the cooldown has elapsed.
-   * Returns true if the transition just occurred (caller emits CIRCUITHALFOPEN).
+   * open → probing if the cooldown has elapsed.
+   * Returns true if the transition just occurred (caller emits CIRCUITPROBING).
    */
   public checkAndTransition(): boolean {
     if (this.state !== 'open') return false;
     if (Date.now() < this.openUntil) return false;
-    this.state = 'half-open';
+    this.state = 'probing';
     this.probeInFlight = false;
     this._probeTaskId = null;
     return true;
@@ -214,7 +214,7 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
     this._probeTaskId = null;
   }
 
-  /** half-open → closed. Resets the eventWindow so stale failures don't re-trip. */
+  /** probing → closed. Resets the eventWindow so stale failures don't re-trip. */
   public handleProbeSuccess(): void {
     this.state = 'closed';
     this.probeInFlight = false;
@@ -222,7 +222,7 @@ export class SaturationCircuitBreaker implements CircuitBreakerStrategy {
     this.eventWindow.reset();
   }
 
-  /** half-open → open. Re-arms the full cooldown. */
+  /** probing → open. Re-arms the full cooldown. */
   public handleProbeFailure(): void {
     this.state = 'open';
     this.probeInFlight = false;

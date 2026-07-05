@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.4.0] - 2026-07-05
+
+### Changed (BREAKING)
+
+- **Renamed the circuit breaker's middle state from "half-open" to "probing," everywhere.** While in this state the breaker admits exactly one canary request and rejects every other acquisition — there is no partial throughput — so "half-open" implied a capacity level (half of normal) that never actually existed. "Probing" names what the state does instead of a (misleading) fraction of capacity. This is a sweeping rename across the public API, shipped with no compatibility aliases — the same deliberate choice this project made for the `CircuitBreaker` → `SaturationCircuitBreaker` rename in v1.3.0.
+  - `CircuitState`: the `'half-open'` member is now `'probing'`.
+  - `CircuitBreakerStrategy.isHalfOpen` is now `isProbing` (implemented by `SaturationCircuitBreaker`, `NoopCircuitBreaker`, `ManualCircuitBreaker`, and any custom strategy passed via `circuitBreaker`).
+  - `SemaphoreEvents.CIRCUITHALFOPEN` (`'circuit-half-open'`) is now `SemaphoreEvents.CIRCUITPROBING` (`'circuit-probing'`).
+  - The `CIRCUIT_HALF_OPEN` error code is now `CIRCUIT_PROBING`.
+  - `status().status.circuitHalfOpen` is now `circuitProbing`; `SemaphoreMetricsSnapshot.meta.circuitHalfOpen` is now `circuitProbing`; `SemaphoreMetrics.markCircuitHalfOpen()` is now `markCircuitProbing()`.
+  - The `CIRCUITOPEN` event's `reason: 'half-open-probe-failed'` value is now `reason: 'probe-failed'`.
+  - Migration: search for `isHalfOpen`, `HALF_OPEN`, `half-open`, and `circuitHalfOpen` and replace with `isProbing`, `PROBING`, `probing`, and `circuitProbing` respectively. Behavior is unchanged — this is a naming-only change.
+
+### Performance
+
+- **`cancel()` is now `O(n)`, down from `O(n log n)`.** It previously rejected each queued task and removed it from the priority heap individually (an `O(log n)` arbitrary-element delete per task, via the same path `abort`/`purge`/`timeout` use). Since `cancel()` discards every queued task unconditionally, it now rejects each one and bulk-clears the heap and the enqueue-ordered list once, matching the `O(n)` pattern `reset()`/`shutdown()` already used.
+- **`cancel()`, `reset()`, and `shutdown()` no longer clone the heap into an array before iterating.** All three previously called the heap's `toArray()` (an `O(n)` copy) to get a snapshot to loop over; they now walk the enqueue-ordered list directly, which was already being maintained for this exact purpose. `IndexedBinaryHeap.toArray()` had no remaining callers and has been removed.
+- **The circuit breaker's queue eviction (`_evictQueueOnCircuitOpen`) gained a bulk-clear fast path.** A compliant breaker (the built-in `SaturationCircuitBreaker`, or any correctly-implemented custom one) only trips from closed, and a probe can only be queued while probing — so the two conditions never coincide, and eviction never actually needs to preserve a live probe in practice. That common case now bulk-clears in `O(n)`, same as above; the previous per-item `delete()` (`O(n log n)`, needed only to selectively skip a live probe) is retained as a fallback for a breaker that violates that contract.
+- **Removed several redundant `Date.now()` reads on hot and burst paths**, reusing an already-current timestamp instead of reading the clock again a few lines later or once per task in a loop: the queued-acquire path, the stale-task purge sweep, the per-task timeout handler (`BackoffTracker.onTimeout()` now takes an optional timestamp, mirroring the existing pattern on `CircuitBreakerStrategy.trackAttempt()`), the scheduler's dispatch loop (one shared read per tick instead of one per dispatched task), and `status()` (shared with its metrics snapshot via `SemaphoreMetrics.getSnapshot()`'s new optional timestamp parameter). None of these change any complexity class; they cut constant-factor clock-read overhead, most visibly under bursts (many tasks purged, timed out, or dispatched in one tick).
+- **Evaluated and rejected a change to the queue comparator.** Gating the probe-priority check in `buildComparator()` behind a cheap "is a probe currently queued" pre-check looked promising in an isolated microbenchmark, but end-to-end contended-throughput measurements (ratioed against `p-limit`/`p-queue` in the same run, to control for system-level noise) showed it was a net wash to slightly negative once wired to the real circuit breaker. Not shipped.
+
 ## [v1.3.5] - 2026-07-04
 
 ### Added

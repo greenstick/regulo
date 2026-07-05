@@ -40,7 +40,7 @@ export interface SemaphoreConfig {
    * When set, `use()` feeds rejections from your function into the circuit
    * breaker: a rejection for which the predicate returns `true` counts as one
    * breaker failure (as if `reportFailure()` were called), and — unlike
-   * `reportFailure()` — it also makes half-open probes fault-aware: a probe
+   * `reportFailure()` — it also makes probes fault-aware: a probe
    * dispatched through `use()` whose operation fails a matching error re-opens
    * the circuit instead of closing it on release.
    *
@@ -78,7 +78,7 @@ export interface SemaphoreConfig {
   /**
    * Custom comparator over queued tasks; the value that sorts lower is
    * dispatched first. Overrides `queueOrder`. Probe tasks (circuit-breaker
-   * half-open) are always sorted ahead of everything else regardless of this
+   * probing) are always sorted ahead of everything else regardless of this
    * comparator, so it never needs to account for them.
    *
    * Must be a consistent total order and must not throw. A comparator that
@@ -112,7 +112,7 @@ export interface QueuedTaskView {
 Circuit Breaker
 */
 
-export type CircuitState = 'closed' | 'open' | 'half-open';
+export type CircuitState = 'closed' | 'open' | 'probing';
 
 export interface CircuitBreakerConfig {
   readonly threshold?: number;
@@ -138,22 +138,22 @@ export type CircuitTripResult =
  *
  * Contract notes for implementers:
  * - `checkAndTransition()` is called at the top of every acquire; return true
- *   exactly once per open → half-open transition (the semaphore emits
- *   CIRCUITHALFOPEN when it sees true).
+ *   exactly once per open → probing transition (the semaphore emits
+ *   CIRCUITPROBING when it sees true).
  * - `evaluateAndTrip()` may only report `tripped: true` for a closed → open
  *   transition; the semaphore then emits CIRCUITOPEN and evicts the queue.
- * - The probe-slot methods manage the single half-open probe; implementations
- *   that never enter half-open may treat them as no-ops.
+ * - The probe-slot methods manage the single probe; implementations
+ *   that never enter probing may treat them as no-ops.
  * - Methods must not throw.
  */
 export interface CircuitBreakerStrategy {
   readonly state: CircuitState;
   readonly isOpen: boolean;
-  readonly isHalfOpen: boolean;
+  readonly isProbing: boolean;
   readonly hasProbeInFlight: boolean;
   readonly probeTaskId: number | null;
   readonly cooldownRemaining: number;
-  /** open → half-open when ready; true if the transition just occurred. */
+  /** open → probing when ready; true if the transition just occurred. */
   checkAndTransition(): boolean;
   /** Record one admission attempt. Called once per actual admission — a granted fast-path acquire (including tryAcquire) or a task enqueued — never for rejected admissions (QUEUE_FULL, null tryAcquire). `now` (epoch ms) is passed when the caller has already read the clock for this admission; read Date.now() yourself if absent and needed. */
   trackAttempt(now?: number): void;
@@ -191,7 +191,7 @@ export const SemaphoreEvents = {
   QUEUEPURGE:      'queue-purge',
   QUEUEEVICT:      'queue-evict',
   CIRCUITOPEN:     'circuit-open',
-  CIRCUITHALFOPEN: 'circuit-half-open',
+  CIRCUITPROBING:  'circuit-probing',
   CIRCUITCLOSE:    'circuit-close',
   SHUTDOWN:        'shutdown',
 } as const;
@@ -212,7 +212,7 @@ export interface SemaphoreEventMap {
   'queue-purge':      [task: QueuedTaskView];
   'queue-evict':      [task: QueuedTaskView];
   'circuit-open':     [payload: { timeoutRate: number; recentTimeouts: number; total: number; reason?: string }];
-  'circuit-half-open': [];
+  'circuit-probing':  [];
   'circuit-close':    [];
   'shutdown':         [reason: string];
 }
@@ -226,7 +226,7 @@ Errors
 
 export type SemaphoreErrorCode =
   | 'CIRCUIT_OPEN'
-  | 'CIRCUIT_HALF_OPEN'
+  | 'CIRCUIT_PROBING'
   | 'INVALID_ARGUMENT'
   | 'INVALID_WEIGHT'
   | 'INVALID_PRIORITY'
@@ -279,7 +279,7 @@ export interface SemaphoreMetricsSnapshot {
     totalAborts:          number;
     capacity:             number;
     circuitOpen:          boolean;
-    circuitHalfOpen:      boolean;
+    circuitProbing:       boolean;
   };
 }
 

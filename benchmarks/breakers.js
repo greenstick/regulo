@@ -43,10 +43,10 @@ function makeSaturationGuard() {
     if (cb.isOpen) return Promise.reject(new Error('circuit open'));
     cb.trackAttempt();
     return fn().then(
-      (r) => { if (cb.isHalfOpen) cb.handleProbeSuccess(); return r; },
+      (r) => { if (cb.isProbing) cb.handleProbeSuccess(); return r; },
       (e) => {
         cb.recordFailure();
-        if (cb.isHalfOpen) cb.handleProbeFailure();
+        if (cb.isProbing) cb.handleProbeFailure();
         else cb.evaluateAndTrip();
         throw e;
       }
@@ -61,10 +61,10 @@ function makeNoopGuard() {
     if (cb.isOpen) return Promise.reject(new Error('circuit open'));
     cb.trackAttempt();
     return fn().then(
-      (r) => { if (cb.isHalfOpen) cb.handleProbeSuccess(); return r; },
+      (r) => { if (cb.isProbing) cb.handleProbeSuccess(); return r; },
       (e) => {
         cb.recordFailure();
-        if (cb.isHalfOpen) cb.handleProbeFailure();
+        if (cb.isProbing) cb.handleProbeFailure();
         else cb.evaluateAndTrip();
         throw e;
       }
@@ -79,10 +79,10 @@ function makeManualGuard() {
     if (cb.isOpen) return Promise.reject(new Error('circuit open'));
     cb.trackAttempt();
     return fn().then(
-      (r) => { if (cb.isHalfOpen) cb.handleProbeSuccess(); return r; },
+      (r) => { if (cb.isProbing) cb.handleProbeSuccess(); return r; },
       (e) => {
         cb.recordFailure();
-        if (cb.isHalfOpen) cb.handleProbeFailure();
+        if (cb.isProbing) cb.handleProbeFailure();
         else cb.evaluateAndTrip();
         throw e;
       }

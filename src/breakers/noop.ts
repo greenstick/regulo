@@ -13,7 +13,7 @@ const NOT_TRIPPED: CircuitTripResult = { tripped: false };
 export class NoopCircuitBreaker implements CircuitBreakerStrategy {
   public readonly state: CircuitState = 'closed';
   public readonly isOpen = false;
-  public readonly isHalfOpen = false;
+  public readonly isProbing = false;
   public readonly hasProbeInFlight = false;
   public readonly probeTaskId = null;
   public readonly cooldownRemaining = 0;

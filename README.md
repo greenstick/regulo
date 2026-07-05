@@ -23,7 +23,7 @@ Like the dial on a gas range, **Regulo** sits between incoming work and the burn
 - **🌡️ Adaptive backoff** — during a timeout burst, dispatch eases down to a simmer and returns to a full boil on its own once things recover.
 - **📈 Built-in observability** — windowed 1m/5m/15m/1h/24h rollups (throughput, latency, queue depth, in-flight), lifetime counters, and an event stream, all through one `status()` call.
 - **⏳ Head-of-line fairness** — once a caller is in line, nobody jumps the queue ahead of it.
-- **🪶 Small footprint, no supply-chain surface** — a single ~33 KB file with zero runtime dependencies, so there's nothing transitive to audit, update, or trust. Tree-shakeable ESM.
+- **🪶 Small footprint, no supply-chain surface** — a single ~34 KB file with zero runtime dependencies, so there's nothing transitive to audit, update, or trust. Tree-shakeable ESM.
 - **🧯 Production-minded** — graceful `drain()`, `reset()`, `cancel()`, and `shutdown()`; stale-task purging; double-release safety; strict-mode TypeScript types.
 
 ## Install
@@ -200,7 +200,7 @@ try {
 
 #### `use<T>(fn, abortSignal?, priority?, weight?): Promise<T>`
 
-Preferred entry point. Acquires a permit, runs `fn()`, and releases — always, even if `fn` throws. With `circuitBreakerFailurePredicate` configured, rejections from `fn()` that match the predicate count as breaker failures, and a matching failure on a half-open probe re-opens the circuit instead of closing it — see [Feeding downstream errors](#feeding-downstream-errors-reportfailure).
+Preferred entry point. Acquires a permit, runs `fn()`, and releases — always, even if `fn` throws. With `circuitBreakerFailurePredicate` configured, rejections from `fn()` that match the predicate count as breaker failures, and a matching failure on a probe re-opens the circuit instead of closing it — see [Feeding downstream errors](#feeding-downstream-errors-reportfailure).
 
 #### `tryAcquire(weight?): (() => void) | null`
 
@@ -224,7 +224,7 @@ Rejects all currently queued tasks with `CANCELLED`. In-flight permits are unaff
 
 #### `reportFailure(): void`
 
-Feeds an external failure signal (e.g. a downstream error) into the circuit breaker: records one failure and evaluates the trip condition. A trip behaves exactly like a saturation trip — queued tasks are evicted with `CIRCUIT_OPEN` and `CIRCUITOPEN` fires with `reason: 'reported-failure'`. Only influences trip decisions while the circuit is closed; no-op after `shutdown()`. For `use()`-based workloads, `circuitBreakerFailurePredicate` automates this and additionally makes half-open probes fault-aware. See [Feeding downstream errors](#feeding-downstream-errors-reportfailure).
+Feeds an external failure signal (e.g. a downstream error) into the circuit breaker: records one failure and evaluates the trip condition. A trip behaves exactly like a saturation trip — queued tasks are evicted with `CIRCUIT_OPEN` and `CIRCUITOPEN` fires with `reason: 'reported-failure'`. Only influences trip decisions while the circuit is closed; no-op after `shutdown()`. For `use()`-based workloads, `circuitBreakerFailurePredicate` automates this and additionally makes probes fault-aware. See [Feeding downstream errors](#feeding-downstream-errors-reportfailure).
 
 #### `shutdown(reason?): void`
 
@@ -260,7 +260,7 @@ Number of permits not currently held.
 
 Total permits the semaphore was constructed with.
 
-#### `circuitState: 'closed' | 'open' | 'half-open'`
+#### `circuitState: 'closed' | 'open' | 'probing'`
 
 Current circuit breaker state.
 
@@ -279,7 +279,7 @@ Current circuit breaker state.
 | `circuitBreakerMinThroughput` | `number` | `10` | Min requests in window before circuit can trip |
 | `circuitBreakerMinFailures` | `number` | `5` | Min failures in window before circuit can trip |
 | `circuitBreaker` | `CircuitBreakerStrategy` | — | A breaker instance to use instead of the built-in saturation breaker; overrides all `circuitBreaker*` options. See [Circuit breakers](#circuit-breakers) |
-| `circuitBreakerFailurePredicate` | `(error: unknown) => boolean` | — | When set, `use()` counts matching rejections as breaker failures and half-open probes become fault-aware. Must not throw. See [Feeding downstream errors](#feeding-downstream-errors-reportfailure) |
+| `circuitBreakerFailurePredicate` | `(error: unknown) => boolean` | — | When set, `use()` counts matching rejections as breaker failures and probes become fault-aware. Must not throw. See [Feeding downstream errors](#feeding-downstream-errors-reportfailure) |
 | `backoffInitialTimeout` | `number` | `50` | Initial backoff delay (ms) applied to scheduler wakeup on first timeout |
 | `backoffMaxTimeout` | `number` | `2000` | Max backoff delay (ms) applied to scheduler wakeup |
 | `backoffDecayFactor` | `number` | `0.5` | Backoff decay factor per idle second, in `(0,1)` |
@@ -340,7 +340,7 @@ Listen with `Semaphore.on(SemaphoreEvents.CIRCUITOPEN, handler)`. Payloads are t
 | `QUEUEPURGE` | `'queue-purge'` | `QueuedTaskView` — `{ id, priority, enqueueTime, weight }` |
 | `QUEUEEVICT` | `'queue-evict'` | `QueuedTaskView` — task evicted (rejected `CIRCUIT_OPEN`) because the circuit tripped while it was queued |
 | `CIRCUITOPEN` | `'circuit-open'` | `{ timeoutRate, recentTimeouts, total, reason? }` |
-| `CIRCUITHALFOPEN` | `'circuit-half-open'` | none |
+| `CIRCUITPROBING` | `'circuit-probing'` | none |
 | `CIRCUITCLOSE` | `'circuit-close'` | none |
 | `SHUTDOWN` | `'shutdown'` | `reason: string` |
 
@@ -351,7 +351,7 @@ Every error **Regulo** raises — whether rejected from a promise or thrown sync
 | Code | When raised |
 |---|---|
 | `CIRCUIT_OPEN` | Circuit breaker is open |
-| `CIRCUIT_HALF_OPEN` | Circuit is half-open and a probe is already in flight |
+| `CIRCUIT_PROBING` | Circuit is probing and a probe is already in flight |
 | `INVALID_ARGUMENT` | Invalid constructor/config value, or an invalid `drain()` timeout (thrown synchronously) |
 | `INVALID_WEIGHT` | `weight` is not an integer in `1..count` |
 | `INVALID_PRIORITY` | `priority` is not a finite number |
@@ -393,7 +393,7 @@ Generated with `status()`.
     inFlight: number,          // same as running (alias for clarity)
     pendingReleases: number,   // outstanding release closures; non-zero means permits are held
     circuitOpen: boolean,
-    circuitHalfOpen: boolean,
+    circuitProbing: boolean,
     backoffDelay: number,      // current backoff delay (ms) applied to scheduler wakeup
     requestsPerSecond: number, // over the shortest metrics window (1m by default)
     timeoutRate1m: number,     // timeout % over the shortest metrics window (1m by default)
@@ -416,6 +416,8 @@ Generated with `status()`.
 The breaker behind `Semaphore` is a pluggable strategy. Every breaker — the built-ins below and any you write — implements the `CircuitBreakerStrategy` contract (exported from the package root), and composes into a `Semaphore` via the `circuitBreaker` config option. Injecting an instance overrides the `circuitBreaker*` numeric options, the same precedence `comparator` has over `queueOrder`.
 
 > **Renamed in 1.3.0:** the former `CircuitBreaker` export is now `SaturationCircuitBreaker`, and its `recordTimeout()` method is now `recordFailure()`. Both are straight renames — behavior is unchanged. See the [CHANGELOG](./CHANGELOG.md) for the migration.
+>
+> **Renamed in 1.4.0:** the breaker's middle state is "probing," not "half-open" — while in this state the breaker admits exactly one canary request, never a fraction of normal capacity, so the old name was misleading. This touches the full public surface with no compatibility aliases: `CircuitState`'s `'half-open'` is now `'probing'`; `isHalfOpen` is now `isProbing`; the `CIRCUITHALFOPEN`/`'circuit-half-open'` event is now `CIRCUITPROBING`/`'circuit-probing'`; the `CIRCUIT_HALF_OPEN` error code is now `CIRCUIT_PROBING`; `status().status.circuitHalfOpen` and the metrics snapshot's `circuitHalfOpen` are now `circuitProbing`; and the `CIRCUITOPEN` event's `reason: 'half-open-probe-failed'` is now `reason: 'probe-failed'`. Behavior is unchanged — see the [CHANGELOG](./CHANGELOG.md) for the full migration table.
 
 | Breaker | Behavior |
 |---|---|
@@ -437,7 +439,7 @@ kill.open();  // shed load now
 kill.close(); // resume
 ```
 
-To write your own, implement `CircuitBreakerStrategy` and pass an instance as `circuitBreaker`. The contract notes live on the exported type's JSDoc — the essentials: `checkAndTransition()` returns `true` exactly once per open → half-open transition, `evaluateAndTrip()` reports closed → open trips (the semaphore then emits `CIRCUITOPEN` and evicts the queue), the probe-slot methods may be no-ops if you never enter half-open, and methods must not throw.
+To write your own, implement `CircuitBreakerStrategy` and pass an instance as `circuitBreaker`. The contract notes live on the exported type's JSDoc — the essentials: `checkAndTransition()` returns `true` exactly once per open → probing transition, `evaluateAndTrip()` reports closed → open trips (the semaphore then emits `CIRCUITOPEN` and evicts the queue), the probe-slot methods may be no-ops if you never enter probing, and methods must not throw.
 
 ### Feeding downstream errors: `reportFailure()`
 
@@ -456,7 +458,7 @@ await semaphore.use(async () => {
 });
 ```
 
-A trip via `reportFailure()` behaves exactly like a saturation trip: queued tasks are evicted with `CIRCUIT_OPEN` and the `CIRCUITOPEN` event fires with `reason: 'reported-failure'`. Reported failures influence trip decisions only while the circuit is closed — half-open probe outcomes remain acquisition-based.
+A trip via `reportFailure()` behaves exactly like a saturation trip: queued tasks are evicted with `CIRCUIT_OPEN` and the `CIRCUITOPEN` event fires with `reason: 'reported-failure'`. Reported failures influence trip decisions only while the circuit is closed — probe outcomes remain acquisition-based.
 
 For `use()`-based workloads, `circuitBreakerFailurePredicate` does this declaratively — and goes one step further:
 
@@ -470,7 +472,7 @@ const semaphore = new Semaphore(10, {
 await semaphore.use(() => callDownstream());
 ```
 
-With the predicate set, half-open probes become **fault-aware**: a probe dispatched through `use()` whose operation fails with a matching error re-opens the circuit (the `CIRCUITOPEN` event fires with `reason: 'half-open-probe-failed'`) instead of closing it on release. A probe whose rejection does *not* match still counts as a successful probe. The predicate must not throw; a thrown predicate is logged via `console.warn` and the rejection is treated as non-matching. The predicate only observes `use()` — callers using bare `acquire()`/`tryAcquire()` should call `reportFailure()` themselves.
+With the predicate set, probes become **fault-aware**: a probe dispatched through `use()` whose operation fails with a matching error re-opens the circuit (the `CIRCUITOPEN` event fires with `reason: 'probe-failed'`) instead of closing it on release. A probe whose rejection does *not* match still counts as a successful probe. The predicate must not throw; a thrown predicate is logged via `console.warn` and the rejection is treated as non-matching. The predicate only observes `use()` — callers using bare `acquire()`/`tryAcquire()` should call `reportFailure()` themselves.
 
 ### Standalone usage
 
@@ -488,20 +490,20 @@ const circuitBreaker = new SaturationCircuitBreaker({
 });
 
 async function fetch(url: string) {
-  // Check and transition open → half-open if cooldown elapsed
+  // Check and transition open → probing if cooldown elapsed
   if (circuitBreaker.checkAndTransition()) {
-    console.log('Circuit entering half-open');
+    console.log('Circuit entering probing');
   }
   if (circuitBreaker.isOpen) throw new Error(`Circuit open, retry in ${circuitBreaker.cooldownRemaining}ms`);
 
   circuitBreaker.trackAttempt();
   try {
     const result = await httpClient.get(url);
-    if (circuitBreaker.isHalfOpen) circuitBreaker.handleProbeSuccess();
+    if (circuitBreaker.isProbing) circuitBreaker.handleProbeSuccess();
     return result;
   } catch (error) {
     circuitBreaker.recordFailure();
-    if (circuitBreaker.isHalfOpen) circuitBreaker.handleProbeFailure();
+    if (circuitBreaker.isProbing) circuitBreaker.handleProbeFailure();
     else circuitBreaker.evaluateAndTrip();
     throw error;
   }
@@ -537,18 +539,18 @@ concurrency, the circuit breakers on per-call overhead.
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `tryAcquire` + `release` (with metrics) | 3.03M | 1.77x slower |
+| `tryAcquire` + `release` (with metrics) | 3.03M | 1.76x slower |
 | `tryAcquire` + `release` | 5.35M | fastest |
-| `use()` round-trip | 1.27M | 4.21x slower |
-| `use()` round-trip (no metrics) | 1.65M | 3.23x slower |
+| `use()` round-trip | 1.16M | 4.61x slower |
+| `use()` round-trip (no metrics) | 1.49M | 3.58x slower |
 
 **🎛️ Weighted acquire, uncontended**
 
 | Scenario | ops/sec | vs. fastest |
 |---|--:|---|
-| `use()` weight=1 | 1.34M | 1.00x slower |
-| `use()` weight=4 | 1.32M | 1.02x slower |
-| `use()` weight=16 | 1.34M | fastest |
+| `use()` weight=1 | 1.20M | fastest |
+| `use()` weight=4 | 1.18M | 1.01x slower |
+| `use()` weight=16 | 1.14M | 1.05x slower |
 
 Weighted permits add no meaningful overhead regardless of weight — claiming
 16 burners at once costs about the same as claiming one.
@@ -557,18 +559,18 @@ Weighted permits add no meaningful overhead regardless of weight — claiming
 
 | Scenario | tasks/sec | vs. fastest |
 |---|--:|---|
-| concurrency=4 | 762.4k | 1.09x slower |
-| concurrency=16 | 786.1k | 1.06x slower |
-| concurrency=64 | 833.5k | fastest |
-| concurrency=16, random priority | 754.1k | 1.11x slower |
+| concurrency=4 | 845.1k | 1.09x slower |
+| concurrency=16 | 854.8k | 1.08x slower |
+| concurrency=64 | 919.6k | fastest |
+| concurrency=16, random priority | 812.9k | 1.13x slower |
 
 **📈 `status()` snapshot cost**
 
 | Queue depth | ops/sec | vs. fastest |
 |---|--:|---|
-| 0 | 738.2k | 1.02x slower |
-| 100 | 754.3k | fastest |
-| 1000 | 741.4k | 1.02x slower |
+| 0 | 725.6k | 1.03x slower |
+| 100 | 747.4k | fastest |
+| 1000 | 739.8k | 1.01x slower |
 
 `status()` is O(1) in queue depth — the cost is flat across queue depths (within
 run-to-run noise) because queue age is read from an enqueue-ordered index rather
@@ -579,31 +581,31 @@ scrape path for arbitrarily long task queues.
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 4.06M | fastest |
-| regulo | 1.73M | 2.34x slower |
-| regulo (with metrics) | 1.26M | 3.23x slower |
-| p-limit | 1.19M | 3.40x slower |
-| p-queue | 1.18M | 3.45x slower |
+| cockatiel (bulkhead) | 4.17M | fastest |
+| regulo | 1.48M | 2.81x slower |
+| p-queue | 1.19M | 3.52x slower |
+| p-limit | 1.17M | 3.56x slower |
+| regulo (with metrics) | 1.14M | 3.64x slower |
 
 **📊 regulo vs. other libraries — contended throughput @ concurrency=16** (tasks/sec)
 
 | Library | tasks/sec | vs. fastest |
 |---|--:|---|
-| cockatiel (bulkhead) | 1.56M | fastest |
-| p-queue | 1.06M | 1.47x slower |
-| regulo | 927.1k | 1.68x slower |
-| p-limit | 903.5k | 1.72x slower |
-| regulo (with metrics) | 686.6k | 2.27x slower |
+| cockatiel (bulkhead) | 1.73M | fastest |
+| p-queue | 1.07M | 1.62x slower |
+| regulo | 984.8k | 1.76x slower |
+| regulo (with metrics) | 893.7k | 1.94x slower |
+| p-limit | 877.1k | 1.98x slower |
 
 **🛡️ Circuit breaker overhead — closed/healthy circuit**
 
 | Library | ops/sec | vs. fastest |
 |---|--:|---|
-| regulo `ManualCircuitBreaker` | 5.10M | fastest |
-| regulo `NoopCircuitBreaker` | 4.66M | 1.09x slower |
-| regulo `SaturationCircuitBreaker` | 3.25M | 1.57x slower |
-| cockatiel (circuitBreaker) | 2.65M | 1.93x slower |
-| opossum | 1.54M | 3.31x slower |
+| regulo `ManualCircuitBreaker` | 5.18M | fastest |
+| regulo `NoopCircuitBreaker` | 4.68M | 1.11x slower |
+| regulo `SaturationCircuitBreaker` | 3.92M | 1.32x slower |
+| cockatiel (circuitBreaker) | 2.79M | 1.86x slower |
+| opossum | 1.61M | 3.21x slower |
 
 The picture is consistent. Cockatiel's bulkhead is the fastest limiter — and
 **Regulo** trades raw limiter throughput for an integrated priority heap, weighted
@@ -621,7 +623,7 @@ rolling window on every call.
 
 In practice none of this is the bottleneck. **Regulo** guards work that is *far*
 more expensive than the limiter itself: SSR renders, database queries,
-downstream API calls, measured in milliseconds. Even at ~690k tasks/sec
+downstream API calls, measured in milliseconds. Even at ~890k tasks/sec
 under contention the per-task overhead is a few microseconds against operations
 thousands of times slower. If you only need a bare concurrency cap on cheap
 work in a hot loop, reach for a leaner limiter; see [Feature comparison](#feature-comparison).
@@ -643,11 +645,11 @@ npx vitest run --coverage
  ✓ test/list.test.ts (9 tests)
  ✓ test/breaker.test.ts (23 tests)
  ✓ test/breakers-passthrough.test.ts (4 tests)
- ✓ test/semaphore-edges.test.ts (29 tests)
+ ✓ test/semaphore-edges.test.ts (30 tests)
  ✓ test/semaphore.test.ts (111 tests)
 
  Test Files  12 passed (12)
-      Tests  260 passed (260)
+      Tests  261 passed (261)
 ```
 
 ```
@@ -655,7 +657,7 @@ npx vitest run --coverage
 ----------------|---------|----------|---------|---------|
 File            | % Stmts | % Branch | % Funcs | % Lines |
 ----------------|---------|----------|---------|---------|
-All files       |    99.6 |    97.84 |     100 |     100 |
+All files       |    99.7 |    97.54 |     100 |     100 |
 ----------------|---------|----------|---------|---------|
 ```
 

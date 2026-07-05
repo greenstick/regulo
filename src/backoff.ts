@@ -48,18 +48,29 @@ export class BackoffTracker {
 
   /** Delay in ms, decayed to the present moment. Floors to 0 below 1ms. */
   public get currentDelay(): number {
+    return this._decayedDelay(Date.now());
+  }
+
+  // Shared decay math, parameterized on `now` so onTimeout() can reuse a
+  // caller-supplied timestamp instead of reading the clock a second time.
+  private _decayedDelay(now: number): number {
     if (this.delay === 0) return 0;
-    const elapsedSec = (Date.now() - this.lastTimestamp) / 1000;
+    const elapsedSec = (now - this.lastTimestamp) / 1000;
     if (elapsedSec <= 0) return this.delay;
     const decayed = this.delay * Math.pow(this.decayFactor, elapsedSec);
     return decayed < 1 ? 0 : decayed;
   }
 
-  public onTimeout(): void {
-    const current = this.currentDelay;
+  /**
+   * Record a timeout, growing the delay. Accepts an optional caller-supplied
+   * timestamp so a caller that already read the clock for this event (the
+   * semaphore's shared timeout watchdog) doesn't pay a second Date.now().
+   */
+  public onTimeout(now = Date.now()): void {
+    const current = this._decayedDelay(now);
     const grown = current > 0 ? current * 2 : this.initialTimeout;
     this.delay = Math.min(grown, this.maxTimeout);
-    this.lastTimestamp = Date.now();
+    this.lastTimestamp = now;
   }
 
   public reset(): void {

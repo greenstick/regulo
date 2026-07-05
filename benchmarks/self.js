@@ -49,9 +49,9 @@ async function main() {
     );
     // Full async round-trip through use().
     const semUse = new Semaphore(1_000_000);
-    fastPath.push(await measure('use() round-trip', () => semUse.use(asyncNoop)));
+    fastPath.push(await measure('use() round-trip (with metrics)', () => semUse.use(asyncNoop)));
     const semUseNm = new Semaphore(1_000_000, { metricsEnabled: false });
-    fastPath.push(await measure('use() round-trip (no metrics)', () => semUseNm.use(asyncNoop)));
+    fastPath.push(await measure('use() round-trip', () => semUseNm.use(asyncNoop)));
     sem.shutdown(); semNoMetrics.shutdown(); semUse.shutdown(); semUseNm.shutdown();
   }
   report('Fast path (uncontended)', fastPath, 'ops/sec');

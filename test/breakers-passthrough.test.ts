@@ -13,7 +13,7 @@ describe('ManualCircuitBreaker', () => {
     const b = new ManualCircuitBreaker();
     expect(b.state).toBe('closed');
     expect(b.isOpen).toBe(false);
-    expect(b.isHalfOpen).toBe(false);
+    expect(b.isProbing).toBe(false);
     expect(b.hasProbeInFlight).toBe(false);
     expect(b.probeTaskId).toBeNull();
     expect(b.cooldownRemaining).toBe(0);
@@ -51,7 +51,7 @@ describe('NoopCircuitBreaker', () => {
     const b = new NoopCircuitBreaker();
     expect(b.state).toBe('closed');
     expect(b.isOpen).toBe(false);
-    expect(b.isHalfOpen).toBe(false);
+    expect(b.isProbing).toBe(false);
     expect(b.hasProbeInFlight).toBe(false);
     expect(b.probeTaskId).toBeNull();
     expect(b.cooldownRemaining).toBe(0);

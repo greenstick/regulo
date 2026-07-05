@@ -53,13 +53,13 @@ describe('SemaphoreMetrics', () => {
       const m = make();
       m.markCircuitOpen();
       expect(m.getSnapshot().meta.circuitOpen).toBe(true);
-      expect(m.getSnapshot().meta.circuitHalfOpen).toBe(false);
-      m.markCircuitHalfOpen();
+      expect(m.getSnapshot().meta.circuitProbing).toBe(false);
+      m.markCircuitProbing();
       expect(m.getSnapshot().meta.circuitOpen).toBe(false);
-      expect(m.getSnapshot().meta.circuitHalfOpen).toBe(true);
+      expect(m.getSnapshot().meta.circuitProbing).toBe(true);
       m.markCircuitClose();
       expect(m.getSnapshot().meta.circuitOpen).toBe(false);
-      expect(m.getSnapshot().meta.circuitHalfOpen).toBe(false);
+      expect(m.getSnapshot().meta.circuitProbing).toBe(false);
     });
   });
 

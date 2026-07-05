@@ -221,7 +221,7 @@ export class SemaphoreMetrics {
   private _totalAborts          = 0;
   private _capacity             = 0;
   private _circuitOpen          = false;
-  private _circuitHalfOpen      = false;
+  private _circuitProbing       = false;
 
   constructor(options: WindowOptions[] = DEFAULT_WINDOW_OPTIONS) {
     if (options.length === 0) throw new SemaphoreError("SemaphoreMetrics requires at least one WindowOptions", "INVALID_ARGUMENT");
@@ -306,12 +306,12 @@ export class SemaphoreMetrics {
   public sampleQueueDepth(v: number): void { const now = Date.now(); for (const w of this.windows) w.sampleQueue(now, v); }
 
   public markCapacityChange(n: number): void { this._capacity = n; }
-  public markCircuitOpen(): void          { this._circuitOpen = true;  this._circuitHalfOpen = false; }
-  public markCircuitHalfOpen(): void      { this._circuitOpen = false; this._circuitHalfOpen = true; }
-  public markCircuitClose(): void         { this._circuitOpen = false; this._circuitHalfOpen = false; }
+  public markCircuitOpen(): void         { this._circuitOpen = true;  this._circuitProbing = false; }
+  public markCircuitProbing(): void      { this._circuitOpen = false; this._circuitProbing = true; }
+  public markCircuitClose(): void        { this._circuitOpen = false; this._circuitProbing = false; }
 
-  public getSnapshot(): SemaphoreMetricsSnapshot {
-    const now = Date.now();
+  /** Accepts an optional caller-supplied timestamp so status() can share one clock read across this and its own live-state fields. */
+  public getSnapshot(now = Date.now()): SemaphoreMetricsSnapshot {
     const windows: Record<string, SemaphoreMetricsWindowSnapshot> = {};
     let firstInflightAvg = 0, firstQueueAvg = 0;
     for (let i = 0; i < this.windowLabels.length; i++) {
@@ -332,7 +332,7 @@ export class SemaphoreMetrics {
         totalAborts:          this._totalAborts,
         capacity:             this._capacity,
         circuitOpen:          this._circuitOpen,
-        circuitHalfOpen:      this._circuitHalfOpen,
+        circuitProbing:       this._circuitProbing,
       },
     };
   }
@@ -341,7 +341,7 @@ export class SemaphoreMetrics {
     for (const w of this.windows) w.reset();
     this._totalAcquiredFast = 0; this._totalAcquiredQueued = 0; this._totalReleased = 0;
     this._totalTimeouts = 0; this._totalPurged = 0; this._totalAborts = 0; this._capacity = 0;
-    this._circuitOpen = false; this._circuitHalfOpen = false;
+    this._circuitOpen = false; this._circuitProbing = false;
   }
 
   public destroy(): void { this.reset(); }

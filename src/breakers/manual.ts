@@ -3,7 +3,7 @@ Manual Circuit Breaker
 
 An operator-controlled kill switch: the circuit is exactly as open as you have
 set it. open() sheds new acquires immediately (CIRCUIT_OPEN); close() restores
-service. There is no cooldown, no half-open, and no probe — recovery is a
+service. There is no cooldown, no probing, and no probe — recovery is a
 deliberate operator action, not an automatic transition.
 
 Note that open() only affects admission of *new* acquires. Tasks already queued
@@ -19,7 +19,7 @@ export class ManualCircuitBreaker implements CircuitBreakerStrategy {
   public state: CircuitState = 'closed';
 
   public get isOpen(): boolean { return this.state === 'open'; }
-  public get isHalfOpen(): boolean { return false; }
+  public get isProbing(): boolean { return false; }
   public readonly hasProbeInFlight = false;
   public readonly probeTaskId = null;
   public get cooldownRemaining(): number { return 0; }

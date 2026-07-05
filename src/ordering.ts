@@ -15,7 +15,7 @@ Two layers:
   buildComparator  — resolves the configured ordering (named preset or a custom
                      `comparator`) and wraps it so probe tasks always sort first.
 
-The probe-first wrapper is a hard invariant, not a preset detail: the half-open
+The probe-first wrapper is a hard invariant, not a preset detail: the probing
 scheduler dispatches only the task whose id matches the in-flight probe, and it
 inspects the heap head to find it. If a custom comparator (or 'lifo') placed the
 probe behind other queued tasks, the probe would never reach the head and the

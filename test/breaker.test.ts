@@ -13,7 +13,7 @@ describe('SaturationCircuitBreaker', () => {
     const cb = make();
     expect(cb.isClosed).toBe(true);
     expect(cb.isOpen).toBe(false);
-    expect(cb.isHalfOpen).toBe(false);
+    expect(cb.isProbing).toBe(false);
   });
 
   describe('evaluateAndTrip', () => {
@@ -55,7 +55,7 @@ describe('SaturationCircuitBreaker', () => {
     });
   });
 
-  describe('checkAndTransition (open → half-open)', () => {
+  describe('checkAndTransition (open → probing)', () => {
     it('returns false when closed', () => {
       expect(make().checkAndTransition()).toBe(false);
     });
@@ -67,13 +67,13 @@ describe('SaturationCircuitBreaker', () => {
       expect(cb.checkAndTransition()).toBe(false);
     });
 
-    it('transitions to half-open after cooldown and returns true', () => {
+    it('transitions to probing after cooldown and returns true', () => {
       const cb = make();
       for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
       expect(cb.checkAndTransition()).toBe(true);
-      expect(cb.isHalfOpen).toBe(true);
+      expect(cb.isProbing).toBe(true);
       expect(cb.hasProbeInFlight).toBe(false);
       expect(cb.probeTaskId).toBeNull();
     });
@@ -84,7 +84,7 @@ describe('SaturationCircuitBreaker', () => {
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
       cb.checkAndTransition();
-      expect(cb.checkAndTransition()).toBe(false); // already half-open, not open
+      expect(cb.checkAndTransition()).toBe(false); // already probing, not open
     });
   });
 
@@ -103,7 +103,7 @@ describe('SaturationCircuitBreaker', () => {
       cb.evaluateAndTrip(); // now open
       // These should not count
       for (let i = 0; i < 10; i++) cb.trackAttempt();
-      // Transition to half-open and close
+      // Transition to probing and close
       vi.advanceTimersByTime(config.cooldown + 1);
       cb.checkAndTransition();
       cb.handleProbeSuccess(); // reset window
@@ -112,12 +112,12 @@ describe('SaturationCircuitBreaker', () => {
       expect(cb.evaluateAndTrip()).toMatchObject({ tripped: false });
     });
 
-    it('skips recording when half-open', () => {
+    it('skips recording when probing', () => {
       const cb = make();
       for (let i = 0; i < 10; i++) { cb.trackAttempt(); cb.recordFailure(); }
       cb.evaluateAndTrip();
       vi.advanceTimersByTime(config.cooldown + 1);
-      cb.checkAndTransition(); // now half-open
+      cb.checkAndTransition(); // now probing
       cb.trackAttempt(); // should be ignored
       cb.handleProbeSuccess(); // closed, window reset
       for (let i = 0; i < 4; i++) cb.trackAttempt();
