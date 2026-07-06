@@ -23,24 +23,24 @@ import type { BackoffConfig } from './types';
 
 export class BackoffTracker {
 
-  private delay = 0;
-  private lastTimestamp = 0;
+  #delay = 0;
+  #lastTimestamp = 0;
 
-  private readonly initialTimeout: number;
-  private readonly maxTimeout: number;
-  private readonly decayFactor: number;
+  readonly #initialTimeout: number;
+  readonly #maxTimeout: number;
+  readonly #decayFactor: number;
 
   constructor(config: BackoffConfig = {}) {
 
     // >= 0
-    this.initialTimeout = validateNumber(config.initialTimeout ?? 50, "BackoffTracker initialTimeout", 0, Number.MAX_SAFE_INTEGER, true, true);
+    this.#initialTimeout = validateNumber(config.initialTimeout ?? 50, "BackoffTracker initialTimeout", 0, Number.MAX_SAFE_INTEGER, true, true);
     // >= 0
-    this.maxTimeout     = validateNumber(config.maxTimeout ?? 2000, "BackoffTracker maxTimeout", 0, Number.MAX_SAFE_INTEGER, true, true);
+    this.#maxTimeout     = validateNumber(config.maxTimeout ?? 2000, "BackoffTracker maxTimeout", 0, Number.MAX_SAFE_INTEGER, true, true);
     // (0, 1)
-    this.decayFactor    = validateNumber(config.decayFactor ?? 0.5, "BackoffTracker decayFactor", 0, 1, false, false);
+    this.#decayFactor    = validateNumber(config.decayFactor ?? 0.5, "BackoffTracker decayFactor", 0, 1, false, false);
 
     // Integrated Cross-Checks
-    if (this.maxTimeout < this.initialTimeout) {
+    if (this.#maxTimeout < this.#initialTimeout) {
       throw new SemaphoreError("BackoffTracker maxTimeout must be >= initialTimeout", 'INVALID_ARGUMENT');
     }
 
@@ -48,16 +48,16 @@ export class BackoffTracker {
 
   /** Delay in ms, decayed to the present moment. Floors to 0 below 1ms. */
   public get currentDelay(): number {
-    return this._decayedDelay(Date.now());
+    return this.#decayedDelay(Date.now());
   }
 
   // Shared decay math, parameterized on `now` so onTimeout() can reuse a
   // caller-supplied timestamp instead of reading the clock a second time.
-  private _decayedDelay(now: number): number {
-    if (this.delay === 0) return 0;
-    const elapsedSec = (now - this.lastTimestamp) / 1000;
-    if (elapsedSec <= 0) return this.delay;
-    const decayed = this.delay * Math.pow(this.decayFactor, elapsedSec);
+  #decayedDelay(now: number): number {
+    if (this.#delay === 0) return 0;
+    const elapsedSec = (now - this.#lastTimestamp) / 1000;
+    if (elapsedSec <= 0) return this.#delay;
+    const decayed = this.#delay * Math.pow(this.#decayFactor, elapsedSec);
     return decayed < 1 ? 0 : decayed;
   }
 
@@ -67,14 +67,14 @@ export class BackoffTracker {
    * semaphore's shared timeout watchdog) doesn't pay a second Date.now().
    */
   public onTimeout(now = Date.now()): void {
-    const current = this._decayedDelay(now);
-    const grown = current > 0 ? current * 2 : this.initialTimeout;
-    this.delay = Math.min(grown, this.maxTimeout);
-    this.lastTimestamp = now;
+    const current = this.#decayedDelay(now);
+    const grown = current > 0 ? current * 2 : this.#initialTimeout;
+    this.#delay = Math.min(grown, this.#maxTimeout);
+    this.#lastTimestamp = now;
   }
 
   public reset(): void {
-    this.delay = 0;
-    this.lastTimestamp = 0;
+    this.#delay = 0;
+    this.#lastTimestamp = 0;
   }
 }

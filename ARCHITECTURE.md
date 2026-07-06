@@ -6,7 +6,7 @@
 
 ## How this report was produced
 
-Every claim below was checked directly against the source in `src/`, not inferred from the README alone. Concretely: the full implementation of each subsystem (semaphore, heap, list, backoff, circuit breakers, metrics, validation) was read end to end; the package was rebuilt from a clean `dist/` with `npm run build`; the full test suite (261 tests across 12 files) was run along with `tsc --noEmit` and the coverage report; and the published bundle was measured directly with `gzip` and `brotli` rather than quoted from a badge. Where a number comes from the project's own documented benchmark runs rather than from this audit, that is stated explicitly with its source. Nothing in this document is copied from marketing copy without independent verification.
+Every claim below was checked directly against the source in `src/`, not inferred from the README alone. Concretely: the full implementation of each subsystem (semaphore, heap, list, backoff, circuit breakers, metrics, validation) was read end to end; the package was rebuilt from a clean `dist/` with `npm run build`; the full test suite (276 tests across 13 files) was run along with `tsc --noEmit` and the coverage report; and the published bundle was measured directly with `gzip` and `brotli` rather than quoted from a badge. Where a number comes from the project's own documented benchmark runs rather than from this audit, that is stated explicitly with its source. Nothing in this document is copied from marketing copy without independent verification.
 
 ---
 
@@ -67,18 +67,20 @@ One clarification worth making precisely, since it's easy to conflate two differ
 
 ### 2.2 Package size
 
-The README states the published bundle is "a single ~34 KB file." A clean rebuild from this audit's copy of the source confirms that figure directly, measured as raw byte counts (KB below is decimal, bytes ÷ 1000) rather than quoted from `tsup`'s own console output:
+The README states the published bundle is "a single ~30 KB file." A clean rebuild from this audit's copy of the source confirms that figure directly, measured as raw byte counts (KB below is decimal, bytes ÷ 1000) rather than quoted from `tsup`'s own console output:
 
 | Artifact | Size | How measured |
 |---|---|---|
-| `dist/index.js` (ESM, minified) | 34,410 B ≈ 34.41 KB | `wc -c` on the built artifact |
-| `dist/index.cjs` (CJS, minified) | 34,452 B ≈ 34.45 KB | `wc -c` on the built artifact |
-| `dist/index.js`, gzip -9 | 8,480 B ≈ 8.48 KB | `gzip -9 -c dist/index.js \| wc -c` |
-| `dist/index.cjs`, gzip -9 | 8,491 B ≈ 8.49 KB | same, on the CJS artifact |
-| `dist/index.js`, Brotli | 7,661 B ≈ 7.66 KB | `brotli -c dist/index.js \| wc -c` |
-| `dist/index.d.ts` / `dist/index.d.cts` (type declarations) | 22,493 B ≈ 22.49 KB each | `wc -c` on the built artifact |
+| `dist/index.js` (ESM, minified) | 29,650 B ≈ 29.65 KB | `wc -c` on the built artifact |
+| `dist/index.cjs` (CJS, minified) | 29,697 B ≈ 29.70 KB | `wc -c` on the built artifact |
+| `dist/index.js`, gzip -9 | 8,385 B ≈ 8.39 KB | `gzip -9 -c dist/index.js \| wc -c` |
+| `dist/index.cjs`, gzip -9 | 8,394 B ≈ 8.39 KB | same, on the CJS artifact |
+| `dist/index.js`, Brotli | 7,546 B ≈ 7.55 KB | `brotli -c dist/index.js \| wc -c` |
+| `dist/index.d.ts` / `dist/index.d.cts` (type declarations) | 23,390 B ≈ 23.39 KB each | `wc -c` on the built artifact |
 
-Minification is aggressive by design: `tsup.config.ts` sets `minifyWhitespace`, `minifyIdentifiers`, `minifySyntax`, `legalComments: 'none'`, and `keepNames: false`. This is what gets the runtime payload from the full multi-file TypeScript source down to ~34 KB of minified JavaScript, and to roughly a quarter of that (~8.5 KB) once gzip-compressed in transit — the number that actually matters for cold-start or edge-function download overhead, since HTTP responses are typically served gzip- or brotli-encoded.
+Minification is aggressive by design: `tsup.config.ts` sets `minifyWhitespace`, `minifyIdentifiers`, `minifySyntax`, `legalComments: 'none'`, and `keepNames: false`. This gets the runtime payload from the full multi-file TypeScript source down to ~30 KB of minified JavaScript — the size actually parsed and executed by Node at `require()`/`import()` time, read straight off local disk with no network or compression involved. The gzip/Brotli figures above are a different, narrower number: what the npm registry actually transfers as a compressed tarball during `npm install` — a one-time download cost, not a per-request or per-process-start one.
+
+Every internal (non-exported) class field and method in `src/` is a true ECMAScript `#private` member, not TypeScript's compile-time-only `private` keyword (see [Section 3.7](#37-keyedsemaphore--one-semaphore-per-key-srckeyedts) for the one deliberate exception). This is what `minifyIdentifiers` needs to actually shorten a name: `private foo` erases to an ordinary property at compile time — indistinguishable from a public one to the bundler, so esbuild never touches it — while `#foo` is enforced by the JS engine itself, which is exactly the closed-world guarantee a minifier needs to safely rename it. The type declarations shrank too (25.27 KB → 23.39 KB): `#private` members are omitted from emitted `.d.ts` output entirely, since no consumer could ever reference them.
 
 ---
 
@@ -107,22 +109,29 @@ If validation passes and a permit is immediately available with nothing else wai
 
 ### 3.4 `use()` — the recommended entry point
 
-`use(fn, abortSignal?, priority?, weight?)` acquires a permit, runs `fn()`, and releases the permit whether `fn()` resolves or rejects. It is implemented as follows (paraphrased from `src/semaphore.ts`):
+`use(fn, abortSignal?, priority?, weight?, onSettle?)` acquires a permit, runs `fn()`, and releases the permit whether `fn()` resolves or rejects. It is implemented as follows (paraphrased from `src/semaphore.ts`):
 
 ```ts
 const release = await this._acquire(abortSignal, priority, weight);
+const start = onSettle ? Date.now() : 0;
 try {
   const result = await fn();
+  const durationMs = onSettle ? Date.now() - start : 0;
   release();
+  onSettle?.(durationMs, 'success'); // caught + console.warn'd if it throws
   return result;
 } catch (error) {
+  const durationMs = onSettle ? Date.now() - start : 0;
   // ... optional circuit-breaker failure-predicate handling ...
   release();
+  onSettle?.(durationMs, 'error');
   throw error;
 }
 ```
 
 This is a `try`/`catch` with an explicit `release()` call in both branches — **not** a `try`/`finally`, despite that being the more obvious way to guarantee "always release." The reason is ordering: when a `circuitBreakerFailurePredicate` is configured, the `catch` branch needs to feed the failure into the circuit breaker (and, if this acquisition happened to be the breaker's probe, re-open the circuit) *before* the permit is released — a plain `finally` block would run after that logic just as well, but the current structure makes the sequencing explicit at the call site. The externally observable guarantee is the one the README documents: the permit is released exactly once, regardless of how `fn()` finishes.
+
+**`onSettle`** times `fn()` itself — not the queue wait, which the metrics window already tracks (see [Section 7.1](#71-metrics)) — and reports whether it resolved or rejected. It runs *after* `release()`, so a throwing `onSettle` can never leave a permit unreleased; the throw is caught and logged via `console.warn`, never masking `fn()`'s own result or propagating past `use()`. It is not invoked at all when `_acquire()` itself rejects (`CIRCUIT_OPEN`, `QUEUE_FULL`, `TIMEOUT`, `ABORTED`, …) — in that case `fn()` never ran, so there is nothing to time. The `durationMs` computation, and its one extra `Date.now()` read, are skipped entirely (`0`, no clock read) when `onSettle` is omitted — callers who don't use the hook pay nothing for it.
 
 ### 3.5 Administrative methods
 
@@ -133,7 +142,7 @@ This is a `try`/`catch` with an explicit `release()` call in both branches — *
 | `cancel()` | Rejects every currently queued task with a `CANCELLED` error. Tasks that already hold a permit and are mid-flight are completely unaffected, and the semaphore remains open for new work afterward. |
 | `shutdown(reason?)` | Permanently disables the semaphore: rejects everything queued, and every future `acquire()`/`use()`/`tryAcquire()` call is refused from then on. Unlike `reset()`, this cannot be undone. |
 | `reportFailure()` | Feeds one external failure signal (e.g., a downstream HTTP 5xx) into the circuit breaker's trip evaluation, independent of the queue-timeout signal the breaker normally watches. See [Section 6.1](#61-circuit-breaker). |
-| `peekQueue()` | Returns a read-only, enqueue-ordered snapshot of everything currently waiting, for diagnostics. |
+| `peekQueue(options?)` | Returns a read-only, enqueue-ordered snapshot of everything currently waiting, for diagnostics. `options.offset`/`options.limit` bound how much of a deep queue is materialized — see [Section 10](#10-complexity-summary-table). |
 | `status()` | A snapshot of live state, lifetime counters, and windowed metrics. See [Section 7.1](#71-metrics). |
 
 ### 3.6 Error codes
@@ -153,6 +162,12 @@ Every rejection Regulo produces carries a `.code` on a `SemaphoreError` (which e
 | `CANCELLED` | The task was queued when `cancel()` was called |
 | `SHUTDOWN` | `shutdown()` (or `reset()`) ran while the task was queued, or an operation was attempted on an already shut-down instance |
 | `PURGED` | The background stale-task sweep evicted the task after `queueMaxAge` (see [Section 8.2](#82-the-purge-sweep)) |
+
+### 3.7 `KeyedSemaphore` — one `Semaphore` per key (`src/keyed.ts`)
+
+A companion class, not a `Semaphore` subclass: it wraps a `Map<ID, Semaphore>` (`ID = string | number`) and lazily constructs a `Semaphore(count, config)` the first time `forKey(key)` is called for a given key; later calls for the same key return the cached instance. `use(key, fn, ...)` is sugar for `forKey(key).use(...)`. This turns the single-failure-domain mitigation from [Section 8.4](#84-single-failure-domain-an-architectural-risk-not-a-bug) — "give each distinct downstream its own `Semaphore`" — into a one-liner instead of hand-rolled `Map` bookkeeping.
+
+`forKey()` is `O(1)`: a `Map` lookup, plus a `Semaphore` construction on a miss. There is no eviction — a key's `Semaphore`, and the `setInterval` purge timer every `Semaphore` starts, lives until `delete(key)` or `shutdown()` is called explicitly. `KeyedSemaphore` is therefore appropriate for a small, bounded key space (one key per downstream dependency, shard, or a fixed tenant list), not a high-cardinality or unbounded one (e.g. one key per end user), which would leak a `Semaphore` and its timer per key with no automatic reclamation.
 
 ---
 
@@ -309,7 +324,7 @@ Four kinds of data are tracked per window:
 | Metric | What it measures | What it does *not* measure |
 |---|---|---|
 | Throughput (`counts.acquired` / `.released`) | Volume of permits granted/returned in the window | — |
-| **Latency** (`latency.avg`) | Average **queue-wait time** — milliseconds from `enqueueTime` to the moment a queued task acquires its permit | **Not** the duration of the caller's own operation. `use()` never times how long `fn()` takes to run; there is no hook around the wrapped function's execution at all. If you need end-to-end operation latency, time `fn()` yourself. |
+| **Latency** (`latency.avg`) | Average **queue-wait time** — milliseconds from `enqueueTime` to the moment a queued task acquires its permit | **Not** the duration of the caller's own operation — this windowed rollup never times how long `fn()` takes to run. `use()`'s optional `onSettle` hook (see [Section 3.4](#34-use--the-recommended-entry-point)) reports that separately, per call, rather than folding it into this window. |
 | Queue depth (`queue.avg` / `.max`) | Queue length sampled at each tracked event | — |
 | In-flight count (`inflight.avg` / `.max`) | Permits currently consumed, sampled at each tracked event | — |
 
@@ -322,7 +337,7 @@ If `metricsEnabled: false`, none of this bookkeeping runs — `metricsCollector`
 | Constant | String value | Payload | Fires when |
 |---|---|---|---|
 | `TASKACQUIRE` | `'task-acquire'` | `{ queued: number; running: number; probe?: boolean }` | A task acquires its permit(s). `probe` is present and `true` only when the admission was the circuit breaker's probe; it is omitted (not `false`) otherwise. |
-| `TASKRELEASE` | `'task-release'` | `{ queued: number; running: number }` | A task's permit(s) are released. |
+| `TASKRELEASE` | `'task-release'` | `{ queued: number; running: number; weight: number }` | A task's permit(s) are released. `weight` is the permit count this specific release returned. |
 | `TASKTIMEOUT` | `'task-timeout'` | `{ queueLength: number; backoffDelay: number; taskId: number }` | A queued task exceeds `queueMaxTimeout`. Note `taskId` is a `number` (an internal monotonic counter), not a string. |
 | `TASKABORT` | `'task-abort'` | none | A queued task's `AbortSignal` fires. |
 | `QUEUEPURGE` | `'queue-purge'` | `QueuedTaskView` — `{ id, priority, enqueueTime, weight }` | The background purge sweep evicts a stale task. The payload is the narrow, read-only `QueuedTaskView` shape — not the internal `QueuedTask` instance, which additionally carries heap/list pointers and one-shot finalization methods that a listener has no legitimate reason to touch. |
@@ -330,6 +345,7 @@ If `metricsEnabled: false`, none of this bookkeeping runs — `metricsCollector`
 | `CIRCUITOPEN` | `'circuit-open'` | `{ timeoutRate: number; recentTimeouts: number; total: number; reason?: string }` | The breaker trips to Open. `reason` is present (e.g. `'probe-failed'`, `'reported-failure'`) only on some trip paths — a plain saturation trip from the Closed state carries no `reason` field at all. |
 | `CIRCUITPROBING` | `'circuit-probing'` | none | The breaker transitions from Open into Probing. |
 | `CIRCUITCLOSE` | `'circuit-close'` | none | The probe succeeds and the breaker returns to Closed. |
+| `CIRCUITSTATECHANGE` | `'circuit-state-change'` | `{ from: CircuitState; to: CircuitState }` | Fires alongside every `CIRCUITOPEN`/`CIRCUITPROBING`/`CIRCUITCLOSE` emission above, carrying the same `(from, to)` pair implied by whichever specific transition just occurred (`checkAndTransition()` only ever reports open→probing; `evaluateAndTrip()` only ever closed→open; the probe handlers only ever fire from probing) — one handler can observe every transition instead of wiring up all three. |
 | `SHUTDOWN` | `'shutdown'` | `reason: string` | `shutdown()` is called. |
 
 Two details worth calling out because they're easy to get wrong by skimming rather than reading the type declarations: several payload fields (`probe`, `reason`) are genuinely *optional* — code that assumes they're always present will misbehave on the common case where they're simply absent, not present-and-`false`. And `QUEUE_EVICT` is a distinct event from `QUEUE_PURGE` — one is the circuit breaker shedding queued load on a trip, the other is the janitorial stale-task sweep — a monitoring setup that only listens for one will silently miss the other.
@@ -365,7 +381,7 @@ A single `Semaphore` instance is one shared failure domain: its circuit breaker 
 
 **Concrete risk:** routing two unrelated workloads through one shared `Semaphore` — say, a fast authentication check and a slow PDF-rendering job — means a slowdown in the slow workload (timeouts piling up from the PDF renderer) can trip the *shared* breaker, which then also rejects the authentication traffic outright, even though nothing is actually wrong with authentication. The breaker has no way to distinguish "this workload is struggling" from "some workload sharing my instance is struggling," because it only ever sees the aggregate.
 
-**Mitigation:** give each distinct downstream dependency, integration point, or workload class its own dedicated `Semaphore` instance. This is cheap (the class itself is lightweight) and it's what makes each breaker's saturation signal actually mean something specific.
+**Mitigation:** give each distinct downstream dependency, integration point, or workload class its own dedicated `Semaphore` instance. This is cheap (the class itself is lightweight) and it's what makes each breaker's saturation signal actually mean something specific. `KeyedSemaphore` (see [Section 3.7](#37-keyedsemaphore--one-semaphore-per-key-srckeyedts)) automates exactly this pattern for a bounded set of resource keys, without hand-rolled `Map` bookkeeping.
 
 ---
 
@@ -392,7 +408,7 @@ All twenty-one `SemaphoreConfig` options (everything passed as the constructor's
 | `backoffMaxTimeout` | `number` (ms) | `2000` | integer ≥ 0, and ≥ `initialTimeout` | Ceiling on the backoff delay |
 | `backoffDecayFactor` | `number` | `0.5` | `(0, 1)` exclusive | Per-second decay multiplier, $\gamma$ in [Section 6.2](#62-adaptive-backoff) |
 | `metricsEnabled` | `boolean` | `true` | — | Enable windowed metrics collection |
-| `metricsWindows` | `WindowOptions[]` | built-in 1m/5m/15m/1h/24h set | each `{ size, stepMs }`; no two windows may share a horizon | Overrides the windows behind `status().metrics` |
+| `metricsWindows` | `WindowOptions[]` | built-in 1m/5m/1h/24h set | each `{ size, stepMs }`; no two windows may share a horizon | Overrides the windows behind `status().metrics` |
 | `queueOrder` | `'fifo' \| 'lifo' \| 'fifoWithPriority' \| 'lifoWithPriority'` | `'fifoWithPriority'` | must be one of the four (or a valid custom string) | Dispatch ordering preset; ignored if `comparator` is set |
 | `comparator` | `(a, b) => number` | — | must be a function if provided | Custom total order over queued tasks; overrides `queueOrder` |
 | `debug` | `boolean` | `false` | — | Console logging and the permit-pool invariant assertion; does **not** gate which events fire |
@@ -426,7 +442,8 @@ A consolidated reference for every operation discussed above, `n` = number of ta
 | Circuit breaker `evaluateAndTrip` | O(w), w = window bucket count (10 default) | §6.1 |
 | Backoff `currentDelay` / `onTimeout` | O(1) | §6.2 |
 | `status()` | O(1) live state + O(w), w = 300 default | §7.1 |
-| `peekQueue()` | O(n) | Walks the full list once |
+| `peekQueue(options?)` | O(n) with no options; O(min(n, offset + limit)) with them | Walks the enqueue-ordered list; `offset`/`limit` bound how far it goes |
+| `KeyedSemaphore.forKey(key)` | O(1) amortized | `Map` lookup, plus a `Semaphore` construction on a miss (§3.7) |
 | `cancel()` / `reset()` / `shutdown()` | O(n) | §8.3 |
 | `_evictQueueOnCircuitOpen()` (internal) | O(n), or O(n log n) on the defensive fallback | §8.3 |
 
@@ -447,10 +464,10 @@ This report's own verification, run against the current source on Node v22.16.0 
 | Check | Result |
 |---|---|
 | `tsc --noEmit` | Clean, no errors |
-| `npm test` (vitest) | 261/261 tests passing across 12 files |
-| `npm run test:coverage` | Statements 99.7%, Branches 97.54%, Functions 100%, Lines 100% — all above the configured thresholds |
+| `npm test` (vitest) | 276/276 tests passing across 13 files |
+| `npm run test:coverage` | Statements 99.72%, Branches 97.67%, Functions 100%, Lines 100% — all above the configured thresholds |
 | `npm run lint:package` (`publint` + `attw --pack`) | `publint`: "All good!"; `attw`: 🟢 across node10, node16-from-CJS, node16-from-ESM, and bundler resolution |
-| Clean `npm run build` | Succeeds; produces the artifact sizes in [Section 2.2](#22-package-size-measured-not-quoted) |
+| Clean `npm run build` | Succeeds; produces the artifact sizes in [Section 2.2](#22-package-size) |
 
 No throughput re-benchmarking was performed as part of this report beyond the correctness/build checks above; the percentage figures above are the project's own documented measurements.
 

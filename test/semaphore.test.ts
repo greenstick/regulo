@@ -368,6 +368,56 @@ describe('Semaphore', () => {
       await expect(sem.use(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
       expect(sem.availablePermits).toBe(1);
     });
+
+    it('onSettle reports duration and the success outcome', async () => {
+      const sem = make(1);
+      const onSettle = vi.fn();
+      const result = await sem.use(async () => 42, undefined, 0, 1, onSettle);
+      expect(result).toBe(42);
+      expect(onSettle).toHaveBeenCalledTimes(1);
+      expect(onSettle).toHaveBeenCalledWith(expect.any(Number), 'success');
+    });
+
+    it('onSettle reports the error outcome when fn throws', async () => {
+      const sem = make(1);
+      const onSettle = vi.fn();
+      await expect(sem.use(async () => { throw new Error('boom'); }, undefined, 0, 1, onSettle)).rejects.toThrow('boom');
+      expect(onSettle).toHaveBeenCalledWith(expect.any(Number), 'error');
+    });
+
+    it('onSettle is never called when the acquire itself is rejected (no fn() ever ran)', async () => {
+      const sem = make(1, { rejectOnFull: true });
+      const held = await sem.acquire(); // fast path; next caller has no capacity
+      const onSettle = vi.fn();
+      await expect(sem.use(async () => 1, undefined, 0, 1, onSettle)).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+      expect(onSettle).not.toHaveBeenCalled();
+      held();
+    });
+
+    it('a throwing onSettle is contained and does not affect a successful result', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const sem = make(1);
+        const onSettle = () => { throw new Error('onSettle boom'); };
+        const result = await sem.use(async () => 42, undefined, 0, 1, onSettle);
+        expect(result).toBe(42);
+        expect(warn).toHaveBeenCalledWith('[Semaphore] onSettle threw:', expect.any(Error));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('a throwing onSettle is contained and the original rejection still propagates', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const sem = make(1);
+        const onSettle = () => { throw new Error('onSettle boom'); };
+        await expect(sem.use(async () => { throw new Error('boom'); }, undefined, 0, 1, onSettle)).rejects.toThrow('boom');
+        expect(warn).toHaveBeenCalledWith('[Semaphore] onSettle threw:', expect.any(Error));
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   // ─── Circuit breaker ──────────────────────────────────────────────────────
@@ -405,9 +455,12 @@ describe('Semaphore', () => {
     it('emits CIRCUITOPEN event', async () => {
       const sem = make(2, cbConfig);
       const onOpen = vi.fn();
+      const stateChangeEmit = vi.fn();
       sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
+      sem.on(SemaphoreEvents.CIRCUITSTATECHANGE, stateChangeEmit);
       await tripCircuit(sem);
       expect(onOpen).toHaveBeenCalled();
+      expect(stateChangeEmit).toHaveBeenCalledWith({ from: 'closed', to: 'open' });
     });
 
     it('evicts remaining queued tasks with CIRCUIT_OPEN when the circuit trips', async () => {
@@ -440,11 +493,14 @@ describe('Semaphore', () => {
       await tripCircuit(sem);
       vi.advanceTimersByTime(2000);
       const probingEmit = vi.fn();
+      const stateChangeEmit = vi.fn();
       sem.on(SemaphoreEvents.CIRCUITPROBING, probingEmit);
+      sem.on(SemaphoreEvents.CIRCUITSTATECHANGE, stateChangeEmit);
       // tryAcquire calls checkAndTransition → emits CIRCUITPROBING, then claims probe
       const probe = sem.tryAcquire();
       expect(sem.status().status.circuitProbing).toBe(true);
       expect(probingEmit).toHaveBeenCalledOnce();
+      expect(stateChangeEmit).toHaveBeenCalledWith({ from: 'open', to: 'probing' });
       probe!();
     });
 
@@ -453,7 +509,9 @@ describe('Semaphore', () => {
       await tripCircuit(sem);
       vi.advanceTimersByTime(2000);
       const closeEmit = vi.fn();
+      const stateChangeEmit = vi.fn();
       sem.on(SemaphoreEvents.CIRCUITCLOSE, closeEmit);
+      sem.on(SemaphoreEvents.CIRCUITSTATECHANGE, stateChangeEmit);
       // tryAcquire → probing → probe slot claimed
       const probe = sem.tryAcquire()!;
       expect(sem.status().status.circuitProbing).toBe(true);
@@ -461,22 +519,16 @@ describe('Semaphore', () => {
       expect(sem.status().status.circuitOpen).toBe(false);
       expect(sem.status().status.circuitProbing).toBe(false);
       expect(closeEmit).toHaveBeenCalledOnce();
+      expect(stateChangeEmit).toHaveBeenNthCalledWith(1, { from: 'open', to: 'probing' });
+      expect(stateChangeEmit).toHaveBeenNthCalledWith(2, { from: 'probing', to: 'closed' });
     });
 
-    it('probe failure re-opens the circuit (unit-level via the breaker)', async () => {
-      // Focused check of the breaker transition in isolation. The full
-      // queued-probe-timeout path through the semaphore is covered end-to-end by
-      // the next test.
-      const sem = make(2, cbConfig);
-      await tripCircuit(sem);
-      vi.advanceTimersByTime(2000);
-      sem.tryAcquire(); // triggers probing, claims probe slot
-      expect(sem.status().status.circuitProbing).toBe(true);
-      // Simulate probe timeout: call handleProbeFailure directly
-      (sem as any).circuit.handleProbeFailure();
-      expect((sem as any).circuit.isOpen).toBe(true);
-      expect((sem as any).circuit.isProbing).toBe(false);
-    });
+    // The breaker's own probing → open transition on a failed probe is
+    // covered directly and standalone in test/breaker.test.ts
+    // ("handleProbeFailure → open, cooldown restarted"). `circuit` is now
+    // `#circuit` — genuinely private — so that unit-level check can no longer
+    // reach through a Semaphore instance; the scenario is still covered
+    // end-to-end through the public API by the next test.
 
     it('a queued probe timing out re-opens the circuit (probing → open, public API)', async () => {
       const sem = make(1, cbConfig);
@@ -493,8 +545,10 @@ describe('Semaphore', () => {
       vi.advanceTimersByTime(2000); // elapse cooldown
       const onProbing = vi.fn();
       const onOpen = vi.fn();
+      const stateChangeEmit = vi.fn();
       sem.on(SemaphoreEvents.CIRCUITPROBING, onProbing);
       sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
+      sem.on(SemaphoreEvents.CIRCUITSTATECHANGE, stateChangeEmit);
 
       // First acquire after cooldown: transitions to probing (the acquire()
       // path, not tryAcquire), then enqueues a queued probe since no permit is free.
@@ -509,6 +563,8 @@ describe('Semaphore', () => {
       expect(sem.status().status.circuitOpen).toBe(true);
       expect(sem.status().status.circuitProbing).toBe(false);
       expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'probe-failed' }));
+      expect(stateChangeEmit).toHaveBeenNthCalledWith(1, { from: 'open', to: 'probing' });
+      expect(stateChangeEmit).toHaveBeenNthCalledWith(2, { from: 'probing', to: 'open' });
 
       held();
     });
@@ -577,12 +633,15 @@ describe('Semaphore', () => {
       const r = await sem.acquire();                          // attempt 1
       const queued = sem.acquire().then(() => null, e => e);  // attempt 2, waits
       const onOpen = vi.fn();
+      const stateChangeEmit = vi.fn();
       sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
+      sem.on(SemaphoreEvents.CIRCUITSTATECHANGE, stateChangeEmit);
       sem.reportFailure();
       expect(sem.circuitState).toBe('closed'); // 1 failure < minFailures
       sem.reportFailure(); // 2 failures / 2 attempts -> trip
       expect(sem.circuitState).toBe('open');
       expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'reported-failure' }));
+      expect(stateChangeEmit).toHaveBeenCalledWith({ from: 'closed', to: 'open' });
       expect(await queued).toMatchObject({ code: 'CIRCUIT_OPEN' }); // evicted, not left to TIMEOUT
       expect(sem.queueLength).toBe(0);
       expect(sem.status().lifetime.totalEvictions).toBe(1);
@@ -618,10 +677,15 @@ describe('Semaphore', () => {
       // Fault-aware probe: a matching failure re-opens instead of closing on release.
       vi.advanceTimersByTime(1001);
       const onOpen = vi.fn();
+      const stateChangeEmit = vi.fn();
       sem.on(SemaphoreEvents.CIRCUITOPEN, onOpen);
+      sem.on(SemaphoreEvents.CIRCUITSTATECHANGE, stateChangeEmit);
       await expect(sem.use(async () => { throw new Error('downstream-5xx'); })).rejects.toThrow();
       expect(sem.circuitState).toBe('open');
       expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: 'probe-failed' }));
+      // use()'s own acquire (open→probing) then the fault-aware release (probing→open).
+      expect(stateChangeEmit).toHaveBeenNthCalledWith(1, { from: 'open', to: 'probing' });
+      expect(stateChangeEmit).toHaveBeenNthCalledWith(2, { from: 'probing', to: 'open' });
       expect(sem.availablePermits).toBe(1); // probe permit was still released
 
       // A probe rejecting with a NON-matching error still closes the circuit.
@@ -868,6 +932,49 @@ describe('Semaphore', () => {
       r();
     });
 
+    it('peekQueue({ limit }) bounds how many entries are collected', async () => {
+      const sem = make(1);
+      const r = await sem.acquire();
+      const acquires = [sem.acquire(), sem.acquire(), sem.acquire()];
+      expect(sem.peekQueue({ limit: 2 })).toHaveLength(2);
+      expect(sem.peekQueue({ limit: 0 })).toEqual([]);
+      expect(sem.peekQueue()).toHaveLength(3); // no options: unbounded, unchanged
+      sem.cancel();
+      await Promise.allSettled(acquires);
+      r();
+    });
+
+    it('peekQueue({ offset }) skips leading entries, in enqueue order', async () => {
+      const sem = make(1);
+      const r = await sem.acquire();
+      const acquires = [sem.acquire(), sem.acquire(), sem.acquire()];
+      const full = sem.peekQueue();
+      expect(sem.peekQueue({ offset: 1 })).toEqual(full.slice(1));
+      expect(sem.peekQueue({ offset: 100 })).toEqual([]); // past the end: empty, not an error
+      sem.cancel();
+      await Promise.allSettled(acquires);
+      r();
+    });
+
+    it('peekQueue({ offset, limit }) pages through a deep queue', async () => {
+      const sem = make(1);
+      const r = await sem.acquire();
+      const acquires = Array.from({ length: 5 }, () => sem.acquire());
+      const full = sem.peekQueue();
+      expect(sem.peekQueue({ offset: 2, limit: 2 })).toEqual(full.slice(2, 4));
+      sem.cancel();
+      await Promise.allSettled(acquires);
+      r();
+    });
+
+    it('peekQueue rejects invalid limit/offset with INVALID_ARGUMENT', () => {
+      const sem = make(1);
+      expect(() => sem.peekQueue({ offset: -1 })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+      expect(() => sem.peekQueue({ limit: -1 })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+      expect(() => sem.peekQueue({ offset: 1.5 })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+      expect(() => sem.peekQueue({ limit: 1.5 })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    });
+
     it('exposes capacity and circuitState', () => {
       const sem = make(3);
       expect(sem.capacity).toBe(3);
@@ -961,6 +1068,7 @@ describe('Semaphore', () => {
       expect(onAcquire).toHaveBeenCalledWith(expect.objectContaining({ queued: 0, running: 1 }));
       r();
       expect(onRelease).toHaveBeenCalledTimes(1);
+      expect(onRelease).toHaveBeenCalledWith(expect.objectContaining({ queued: 0, running: 0, weight: 1 }));
     });
 
     it('emits task-acquire when a queued task is dispatched (without debug mode)', async () => {
@@ -1053,6 +1161,15 @@ describe('Semaphore', () => {
       await expect(sem.acquire(undefined, NaN)).rejects.toMatchObject({ code: 'INVALID_PRIORITY' });
       await expect(sem.acquire(undefined, Infinity)).rejects.toMatchObject({ code: 'INVALID_PRIORITY' });
       await expect(sem.acquire(undefined, -Infinity)).rejects.toMatchObject({ code: 'INVALID_PRIORITY' });
+    });
+
+    it('task-release reports the weight that was released, not just queued/running', async () => {
+      const sem = make(3);
+      const onRelease = vi.fn();
+      sem.on(SemaphoreEvents.TASKRELEASE, onRelease);
+      const r = await sem.acquire(undefined, 0, 2);
+      r();
+      expect(onRelease).toHaveBeenCalledWith(expect.objectContaining({ weight: 2 }));
     });
   });
 

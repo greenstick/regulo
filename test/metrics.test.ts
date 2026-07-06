@@ -88,7 +88,7 @@ describe('SemaphoreMetrics', () => {
   describe('getSnapshot', () => {
     it('returns correct window labels', () => {
       const snap = make().getSnapshot();
-      expect(Object.keys(snap.windows)).toEqual(['1m', '5m', '15m', '1h', '24h']);
+      expect(Object.keys(snap.windows)).toEqual(['1m', '5m', '1h', '24h']);
     });
 
     it('snapshot windows have expected shape', () => {

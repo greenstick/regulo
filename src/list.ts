@@ -30,40 +30,40 @@ export interface IntrusiveNode<T> {
 }
 
 export class IntrusiveList<T extends IntrusiveNode<T>> {
-  private head: T | null = null;
-  private tail: T | null = null;
-  private _size = 0;
+  #head: T | null = null;
+  #tail: T | null = null;
+  #size = 0;
 
-  public get size(): number { return this._size; }
-  public isEmpty(): boolean { return this._size === 0; }
+  public get size(): number { return this.#size; }
+  public isEmpty(): boolean { return this.#size === 0; }
 
   /** Oldest (earliest-appended) element, or undefined when empty. O(1). */
-  public peekHead(): T | undefined { return this.head === null ? undefined : this.head; }
+  public peekHead(): T | undefined { return this.#head === null ? undefined : this.#head; }
 
   /** Append to the tail, preserving insertion order. O(1). */
   public pushTail(item: T): void {
-    item.prev = this.tail;
+    item.prev = this.#tail;
     item.next = null;
-    if (this.tail !== null) this.tail.next = item;
-    else this.head = item;
-    this.tail = item;
-    this._size++;
+    if (this.#tail !== null) this.#tail.next = item;
+    else this.#head = item;
+    this.#tail = item;
+    this.#size++;
   }
 
   /** Unlink a member element. O(1). The caller must guarantee membership. */
   public remove(item: T): void {
     if (item.prev !== null) item.prev.next = item.next;
-    else this.head = item.next;
+    else this.#head = item.next;
     if (item.next !== null) item.next.prev = item.prev;
-    else this.tail = item.prev;
+    else this.#tail = item.prev;
     item.prev = item.next = null;
-    this._size--;
+    this.#size--;
   }
 
   public clear(): void {
     // Detached elements keep stale prev/next, which is harmless: an element is
     // only ever re-touched via pushTail, and that overwrites both pointers.
-    this.head = this.tail = null;
-    this._size = 0;
+    this.#head = this.#tail = null;
+    this.#size = 0;
   }
 }

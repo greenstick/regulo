@@ -35,11 +35,11 @@ export class QueuedTask {
   // and mutated solely by that heap.
   public heapIndex = -1;
 
-  private completed = false;
-  private abortListener?: () => void;
-  private readonly abortSignal?: AbortSignal;
-  private readonly _resolve: (release: () => void) => void;
-  private readonly _reject: (err: Error) => void;
+  #completed = false;
+  #abortListener?: () => void;
+  readonly #abortSignal?: AbortSignal;
+  readonly #resolve: (release: () => void) => void;
+  readonly #reject: (err: Error) => void;
 
   constructor(config: {
     id: number;
@@ -56,9 +56,9 @@ export class QueuedTask {
     this.enqueueTime = config.enqueueTime;
     this.isProbe = config.isProbe;
     this.weight = config.weight ?? 1;
-    this._resolve = config.resolve;
-    this._reject = config.reject;
-    this.abortSignal = config.abortSignal;
+    this.#resolve = config.resolve;
+    this.#reject = config.reject;
+    this.#abortSignal = config.abortSignal;
   }
 
   /**
@@ -72,11 +72,11 @@ export class QueuedTask {
    * per-task because it is event-driven (an `AbortSignal` listener), not polled.
    */
   public arm(onAbort: () => void): void {
-    if (this.abortSignal) {
-      this.abortListener = () => {
+    if (this.#abortSignal) {
+      this.#abortListener = () => {
         if (this.claim()) onAbort();
       };
-      this.abortSignal.addEventListener('abort', this.abortListener);
+      this.#abortSignal.addEventListener('abort', this.#abortListener);
     }
   }
 
@@ -86,7 +86,7 @@ export class QueuedTask {
    */
   public dispatch(createRelease: () => () => void): boolean {
     if (!this.claim()) return false;
-    this._resolve(createRelease());
+    this.#resolve(createRelease());
     return true;
   }
 
@@ -96,7 +96,7 @@ export class QueuedTask {
    */
   public discard(err: Error): boolean {
     if (!this.claim()) return false;
-    this._reject(err);
+    this.#reject(err);
     return true;
   }
 
@@ -108,15 +108,15 @@ export class QueuedTask {
    * timeout side effects, then reject() it — a staged variant of discard().
    */
   public claim(): boolean {
-    if (this.completed) return false;
-    this.completed = true;
-    if (this.abortSignal && this.abortListener) {
-      this.abortSignal.removeEventListener('abort', this.abortListener);
+    if (this.#completed) return false;
+    this.#completed = true;
+    if (this.#abortSignal && this.#abortListener) {
+      this.#abortSignal.removeEventListener('abort', this.#abortListener);
     }
     return true;
   }
 
 
   /** Reject this task's promise. The caller must have won claim() first. */
-  public reject(err: Error): void { this._reject(err); }
+  public reject(err: Error): void { this.#reject(err); }
 }

@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`onSettle` hook on `use()`.** `use<T>(fn, abortSignal?, priority?, weight?, onSettle?)` accepts an optional `(durationMs, outcome) => void` callback reporting how long `fn()` itself took (not queue-wait time, which `status().metrics` already covers) and whether it resolved (`'success'`) or rejected (`'error'`). Never called if the acquire itself is rejected — there's no operation to time. A throwing hook is caught and logged via `console.warn`, never masking `fn()`'s own result. Unlocks per-operation latency histograms and SLO tracking without hand-threading timing calls through every call site.
+- **`weight` on the `TASKRELEASE` event.** The payload is now `{ queued, running, weight }` — `weight` is the permit count the release actually returned, enabling a weighted-pool utilization dashboard (e.g. tracking how many of N weighted burners are occupied) without re-deriving it from paired acquire/release bookkeeping.
+- **`CIRCUITSTATECHANGE` event** (`'circuit-state-change'`, payload `{ from, to }`) — fires alongside every `CIRCUITOPEN`/`CIRCUITPROBING`/`CIRCUITCLOSE`, so syncing breaker state to an external dashboard takes one handler instead of three.
+- **`peekQueue({ offset?, limit? })`** — bounds how much of a deep queue gets materialized for an admin-debug endpoint. `offset` skips leading entries (in enqueue order); `limit` caps how many are collected after that. `peekQueue()` with no arguments is unchanged — the full queue, as before.
+- **`KeyedSemaphore`** — a lazily-populated registry of one `Semaphore` per key (`forKey(key)`, plus `use()`/`has()`/`delete()`/`shutdown()`/`size`/`keys()`), turning the "one `Semaphore` per resource" pattern the docs already recommended into a one-liner instead of hand-rolled `Map` bookkeeping. No TTL/eviction by design — intended for a small, bounded key space (per-downstream, per-shard), not high-cardinality keys.
+- **`ID` type** (`string | number`) is now exported from the package root, used by `KeyedSemaphore`'s key parameter.
+
+### Performance
+
+- **Dropped the built-in 15m metrics window.** The default set is now 1m/5m/1h/24h. Every `on*`/`sample*` call on the hot acquire/release/timeout path loops over all configured windows, so this is a ~20% cut in per-event metrics overhead. 15m sat between the 5m short-trend window and the 1h medium-trend window without giving dashboards or circuit-breaker consumers a horizon they don't already get from one of its neighbors. Custom `metricsWindows` configs are unaffected — this only changes `DEFAULT_WINDOW_OPTIONS`.
+
 ## [v1.4.0] - 2026-07-05
 
 ### Changed (BREAKING)

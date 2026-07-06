@@ -108,6 +108,14 @@ export interface QueuedTaskView {
   readonly weight: number;
 }
 
+/** Options for `peekQueue()`: bound how much of a deep queue gets materialized. */
+export interface PeekQueueOptions {
+  /** Skip this many queued tasks (in enqueue order) before collecting. Must be a non-negative integer. Default: 0. */
+  offset?: number;
+  /** Maximum number of tasks to collect after the offset. Must be a non-negative integer. Default: unbounded. */
+  limit?: number;
+}
+
 /*
 Circuit Breaker
 */
@@ -180,20 +188,28 @@ export interface BackoffConfig {
 }
 
 /*
+Operation Outcome
+*/
+
+/** Passed to `use()`'s optional `onSettle` hook: whether `fn()` resolved or rejected. */
+export type OperationOutcome = 'success' | 'error';
+
+/*
 Events
 */
 
 export const SemaphoreEvents = {
-  TASKACQUIRE:     'task-acquire',
-  TASKRELEASE:     'task-release',
-  TASKTIMEOUT:     'task-timeout',
-  TASKABORT:       'task-abort',
-  QUEUEPURGE:      'queue-purge',
-  QUEUEEVICT:      'queue-evict',
-  CIRCUITOPEN:     'circuit-open',
-  CIRCUITPROBING:  'circuit-probing',
-  CIRCUITCLOSE:    'circuit-close',
-  SHUTDOWN:        'shutdown',
+  TASKACQUIRE:         'task-acquire',
+  TASKRELEASE:         'task-release',
+  TASKTIMEOUT:         'task-timeout',
+  TASKABORT:           'task-abort',
+  QUEUEPURGE:          'queue-purge',
+  QUEUEEVICT:          'queue-evict',
+  CIRCUITOPEN:         'circuit-open',
+  CIRCUITPROBING:      'circuit-probing',
+  CIRCUITCLOSE:        'circuit-close',
+  CIRCUITSTATECHANGE:  'circuit-state-change',
+  SHUTDOWN:            'shutdown',
 } as const;
 
 export type SemaphoreEventType = typeof SemaphoreEvents[keyof typeof SemaphoreEvents];
@@ -205,16 +221,17 @@ export type SemaphoreEventType = typeof SemaphoreEvents[keyof typeof SemaphoreEv
  * signature exact.
  */
 export interface SemaphoreEventMap {
-  'task-acquire':     [payload: { queued: number; running: number; probe?: boolean }];
-  'task-release':     [payload: { queued: number; running: number }];
-  'task-timeout':     [payload: { queueLength: number; backoffDelay: number; taskId: number }];
-  'task-abort':       [];
-  'queue-purge':      [task: QueuedTaskView];
-  'queue-evict':      [task: QueuedTaskView];
-  'circuit-open':     [payload: { timeoutRate: number; recentTimeouts: number; total: number; reason?: string }];
-  'circuit-probing':  [];
-  'circuit-close':    [];
-  'shutdown':         [reason: string];
+  'task-acquire':          [payload: { queued: number; running: number; probe?: boolean }];
+  'task-release':          [payload: { queued: number; running: number; weight: number }];
+  'task-timeout':          [payload: { queueLength: number; backoffDelay: number; taskId: number }];
+  'task-abort':            [];
+  'queue-purge':           [task: QueuedTaskView];
+  'queue-evict':           [task: QueuedTaskView];
+  'circuit-open':          [payload: { timeoutRate: number; recentTimeouts: number; total: number; reason?: string }];
+  'circuit-probing':       [];
+  'circuit-close':         [];
+  'circuit-state-change':  [payload: { from: CircuitState; to: CircuitState }];
+  'shutdown':              [reason: string];
 }
 
 /** Listener signature for a given event, derived from {@link SemaphoreEventMap}. */

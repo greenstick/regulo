@@ -24,44 +24,44 @@ export interface HeapNode {
 }
 
 export class IndexedBinaryHeap<T extends HeapNode> {
-  private heap: T[] = [];
-  private readonly compare: Comparator<T>;
+  #heap: T[] = [];
+  readonly #compare: Comparator<T>;
 
   constructor(comparator: Comparator<T>) {
-    this.compare = comparator;
+    this.#compare = comparator;
   }
 
-  public get size(): number { return this.heap.length; }
-  public isEmpty(): boolean { return this.heap.length === 0; }
-  public peek(): T | undefined { return this.heap[0]; }
+  public get size(): number { return this.#heap.length; }
+  public isEmpty(): boolean { return this.#heap.length === 0; }
+  public peek(): T | undefined { return this.#heap[0]; }
 
   /** True if `item` is currently in this heap. O(1). */
   public has(item: T): boolean {
-    return item.heapIndex >= 0 && this.heap[item.heapIndex] === item;
+    return item.heapIndex >= 0 && this.#heap[item.heapIndex] === item;
   }
 
   public clear(): void {
-    for (const item of this.heap) item.heapIndex = -1;
-    this.heap = [];
+    for (const item of this.#heap) item.heapIndex = -1;
+    this.#heap = [];
   }
 
   public insert(item: T): void {
     if (item.heapIndex >= 0) throw new SemaphoreError('Item is already in a heap', 'INVALID_ARGUMENT');
-    const index = this.heap.length;
-    this.heap.push(item);
+    const index = this.#heap.length;
+    this.#heap.push(item);
     item.heapIndex = index;
-    this._bubbleUp(index);
+    this.#bubbleUp(index);
   }
 
   public pop(): T | undefined {
-    if (this.heap.length === 0) return undefined;
-    const root = this.heap[0];
+    if (this.#heap.length === 0) return undefined;
+    const root = this.#heap[0];
     root.heapIndex = -1;
-    const last = this.heap.pop()!;
-    if (this.heap.length > 0 && last !== root) {
-      this.heap[0] = last;
+    const last = this.#heap.pop()!;
+    if (this.#heap.length > 0 && last !== root) {
+      this.#heap[0] = last;
       last.heapIndex = 0;
-      this._bubbleDown(0);
+      this.#bubbleDown(0);
     }
     return root;
   }
@@ -69,43 +69,43 @@ export class IndexedBinaryHeap<T extends HeapNode> {
   /** Remove a specific element. O(log N). Returns it, or undefined if absent. */
   public delete(item: T): T | undefined {
     const index = item.heapIndex;
-    if (index < 0 || this.heap[index] !== item) return undefined;
+    if (index < 0 || this.#heap[index] !== item) return undefined;
     item.heapIndex = -1;
-    const last = this.heap.pop()!;
-    if (index === this.heap.length || last === item) return item; // removed the tail
-    this.heap[index] = last;
+    const last = this.#heap.pop()!;
+    if (index === this.#heap.length || last === item) return item; // removed the tail
+    this.#heap[index] = last;
     last.heapIndex = index;
-    const parent = this.heap[(index - 1) >> 1];
-    if (index > 0 && this.compare(last, parent) < 0) this._bubbleUp(index);
-    else this._bubbleDown(index);
+    const parent = this.#heap[(index - 1) >> 1];
+    if (index > 0 && this.#compare(last, parent) < 0) this.#bubbleUp(index);
+    else this.#bubbleDown(index);
     return item;
   }
 
-  private _swap(i: number, j: number): void {
-    const a = this.heap[i], b = this.heap[j];
-    this.heap[i] = b; this.heap[j] = a;
+  #swap(i: number, j: number): void {
+    const a = this.#heap[i], b = this.#heap[j];
+    this.#heap[i] = b; this.#heap[j] = a;
     a.heapIndex = j; b.heapIndex = i;
   }
 
-  private _bubbleUp(index: number): void {
+  #bubbleUp(index: number): void {
     while (index > 0) {
       const parent = (index - 1) >> 1;
-      if (this.compare(this.heap[index], this.heap[parent]) < 0) {
-        this._swap(index, parent);
+      if (this.#compare(this.#heap[index], this.#heap[parent]) < 0) {
+        this.#swap(index, parent);
         index = parent;
       } else break;
     }
   }
 
-  private _bubbleDown(index: number): void {
-    const len = this.heap.length;
+  #bubbleDown(index: number): void {
+    const len = this.#heap.length;
     while (true) {
       let smallest = index;
       const l = 2 * index + 1, r = 2 * index + 2;
-      if (l < len && this.compare(this.heap[l], this.heap[smallest]) < 0) smallest = l;
-      if (r < len && this.compare(this.heap[r], this.heap[smallest]) < 0) smallest = r;
+      if (l < len && this.#compare(this.#heap[l], this.#heap[smallest]) < 0) smallest = l;
+      if (r < len && this.#compare(this.#heap[r], this.#heap[smallest]) < 0) smallest = r;
       if (smallest === index) break;
-      this._swap(index, smallest);
+      this.#swap(index, smallest);
       index = smallest;
     }
   }

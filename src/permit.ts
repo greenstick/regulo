@@ -11,6 +11,12 @@ clamps to zero (reset-order safe).
 */
 
 export class PermitPool {
+  // Deliberately `private`, not `#private`: test/permit.test.ts corrupts
+  // _available directly to force assertInvariant() into its violation branch.
+  // Once acquire()/release()/reset() are the only mutators, that branch is
+  // unreachable through any real caller — true `#private` would make it
+  // untestable rather than just hard to reach, so these two stay reachable
+  // via `(pool as any)._available` for that one white-box test.
   private _available: number;
   private _inFlight = 0;
   public readonly capacity: number;

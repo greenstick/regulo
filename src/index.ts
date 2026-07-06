@@ -1,6 +1,9 @@
 // Primary export — the semaphore itself
 export { Semaphore } from './semaphore';
 
+// Lazily-populated one-Semaphore-per-key registry
+export { KeyedSemaphore } from './keyed';
+
 // Error class — needed for instanceof checks and error code inspection
 export { SemaphoreError } from './error';
 
@@ -29,6 +32,9 @@ export type {
   CircuitState,
   CircuitTripResult,
   Comparator,
+  ID,
+  OperationOutcome,
+  PeekQueueOptions,
   QueueOrder,
   QueuedTaskView,
   WindowOptions,
