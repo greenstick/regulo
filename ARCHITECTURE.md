@@ -1,7 +1,7 @@
-# Regulo v1.4.0 — Architecture, Correctness, and Complexity Audit
+# Regulo v1.5.1 — Architecture, Correctness, and Complexity Audit
 
 **Subject:** `regulo`, a priority-queue semaphore with an integrated circuit breaker<br/> 
-**Version audited:** 1.4.0<br/>
+**Version audited:** 1.5.1<br/>
 **Scope:** full source tree (`src/`), test suite (`test/`), build configuration, and published documentation (`README.md`, `CHANGELOG.md`)
 
 ## How this report was produced
@@ -315,9 +315,9 @@ Both `currentDelay` reads and `onTimeout()` updates are `O(1)` — a single `Mat
 
 `status()` returns a snapshot of live state, lifetime counters, and windowed metrics in one call. Live state fields (`running`, `queued`, `available`, `circuitOpen`, `circuitProbing`, the oldest queued task's age, and so on) are all `O(1)` field or getter reads — none of them scan the queue.
 
-The windowed metrics are more subtle. By default, Regulo tracks five rolling horizons — 1 minute, 5 minutes, 15 minutes, 1 hour, and 24 hours — each internally divided into 60 fixed buckets (so a bucket in the 1-minute window covers 1 second, while a bucket in the 24-hour window covers 24 minutes). Recording an acquire, release, or timeout is `O(1)`: resolve the current bucket for each of the five windows (cached between calls, recomputed only on a bucket rollover) and increment a few counters. Reading a full snapshot via `getSnapshot()` sums across every bucket of every window — a fixed 5 × 60 = 300 array reads, regardless of how deep the queue is, how many permits are in flight, or how many requests have been served over the semaphore's lifetime.
+The windowed metrics are more subtle. By default, Regulo tracks four rolling horizons — 1 minute, 5 minutes, 1 hour, and 24 hours — each internally divided into 60 fixed buckets (so a bucket in the 1-minute window covers 1 second, while a bucket in the 24-hour window covers 24 minutes). Recording an acquire, release, or timeout is `O(1)`: resolve the current bucket for each of the four windows (cached between calls, recomputed only on a bucket rollover) and increment a few counters. Reading a full snapshot via `getSnapshot()` sums across every bucket of every window — a fixed 4 × 60 = 240 array reads, regardless of how deep the queue is, how many permits are in flight, or how many requests have been served over the semaphore's lifetime.
 
-This is what the project means by `status()` being "`O(1)`," and it's worth being precise about the claim rather than repeating it uncritically: it is `O(1)` *with respect to queue depth, in-flight count, and lifetime request volume* — the quantities that would make a naive metrics implementation (one that, say, scanned the live queue or kept a growing log of timestamped events) slow down as load increases. It is technically `O(w)` in the number of *configured* metrics buckets, but `w` is a small constant fixed at construction time (300 by default) that never grows with traffic. That distinction is exactly why `status()` is safe to call from a high-frequency Prometheus scrape endpoint even while the queue is deeply backed up — the cost of the call doesn't depend on how backed up it is.
+This is what the project means by `status()` being "`O(1)`," and it's worth being precise about the claim rather than repeating it uncritically: it is `O(1)` *with respect to queue depth, in-flight count, and lifetime request volume* — the quantities that would make a naive metrics implementation (one that, say, scanned the live queue or kept a growing log of timestamped events) slow down as load increases. It is technically `O(w)` in the number of *configured* metrics buckets, but `w` is a small constant fixed at construction time (240 by default) that never grows with traffic. That distinction is exactly why `status()` is safe to call from a high-frequency Prometheus scrape endpoint even while the queue is deeply backed up — the cost of the call doesn't depend on how backed up it is.
 
 Four kinds of data are tracked per window:
 
@@ -413,7 +413,7 @@ All twenty-one `SemaphoreConfig` options (everything passed as the constructor's
 | `comparator` | `(a, b) => number` | — | must be a function if provided | Custom total order over queued tasks; overrides `queueOrder` |
 | `debug` | `boolean` | `false` | — | Console logging and the permit-pool invariant assertion; does **not** gate which events fire |
 
-Two cross-field rules enforced at construction (not just documented, but actually thrown as `INVALID_ARGUMENT` if violated): `backoffMaxTimeout >= backoffInitialTimeout`, and `circuitBreakerMinThroughput >= circuitBreakerMinFailures`. Misconfiguring either fails fast at `new Semaphore(...)` time rather than producing confusing behavior under load later.
+Several cross-field rules are enforced at construction (not just documented, but actually thrown as `INVALID_ARGUMENT` if violated): `backoffMaxTimeout >= backoffInitialTimeout`, `circuitBreakerMinThroughput >= circuitBreakerMinFailures`, and — inside the breaker's own construction — `circuitBreakerWindow >= circuitBreakerWindowBucketWidth` and at least 2 resulting window buckets (`⌈window / windowBucketWidth⌉ >= 2`, so a single-bucket window can't silently clobber same-window data on rollover). Misconfiguring any of these fails fast at `new Semaphore(...)` time rather than producing confusing behavior under load later.
 
 **Operational recommendation:** keep `queueMaxAge` comfortably above `queueMaxTimeout` (the defaults already do — 30 s vs. 10 s). This isn't enforced by the constructor, but it's what lets the fast, precise per-task watchdog ([Section 5](#5-the-single-timer-watchdog)) handle the normal timeout case, with the purge sweep acting purely as a backstop for tasks that somehow evaded it — rather than the coarser, janitorial sweep routinely doing the watchdog's job.
 
@@ -441,7 +441,7 @@ A consolidated reference for every operation discussed above, `n` = number of ta
 | Circuit breaker `trackAttempt` / `recordFailure` | O(1) amortized | §6.1 |
 | Circuit breaker `evaluateAndTrip` | O(w), w = window bucket count (10 default) | §6.1 |
 | Backoff `currentDelay` / `onTimeout` | O(1) | §6.2 |
-| `status()` | O(1) live state + O(w), w = 300 default | §7.1 |
+| `status()` | O(1) live state + O(w), w = 240 default | §7.1 |
 | `peekQueue(options?)` | O(n) with no options; O(min(n, offset + limit)) with them | Walks the enqueue-ordered list; `offset`/`limit` bound how far it goes |
 | `KeyedSemaphore.forKey(key)` | O(1) amortized | `Map` lookup, plus a `Semaphore` construction on a miss (§3.7) |
 | `cancel()` / `reset()` / `shutdown()` | O(n) | §8.3 |
@@ -475,7 +475,7 @@ No throughput re-benchmarking was performed as part of this report beyond the co
 
 ## 12. Summary and Recommendations
 
-Regulo (v1.4.0) is a small, dependency-free, carefully validated concurrency primitive that goes meaningfully beyond a plain "cap N concurrent calls" limiter: a priority-aware wait queue with fairness guarantees, a saturation-driven circuit breaker with a Closed/Open/Probing state machine, wall-clock-decaying backoff, and windowed metrics, all built on data structures chosen and specialized (intrusively indexed) specifically for this workload rather than borrowed off the shelf unmodified. The codebase's own internal comments consistently match its actual behavior — a good sign for a library whose failure modes matter — and every claim in this report that could be independently checked (type-checking, tests, coverage, package size, event/error shapes) was checked directly rather than taken on faith.
+Regulo (v1.5.1) is a small, dependency-free, carefully validated concurrency primitive that goes meaningfully beyond a plain "cap N concurrent calls" limiter: a priority-aware wait queue with fairness guarantees, a saturation-driven circuit breaker with a Closed/Open/Probing state machine, wall-clock-decaying backoff, and windowed metrics, all built on data structures chosen and specialized (intrusively indexed) specifically for this workload rather than borrowed off the shelf unmodified. The codebase's own internal comments consistently match its actual behavior — a good sign for a library whose failure modes matter — and every claim in this report that could be independently checked (type-checking, tests, coverage, package size, event/error shapes) was checked directly rather than taken on faith.
 
 Recommendations for production use:
 
